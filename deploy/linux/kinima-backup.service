@@ -1,0 +1,19 @@
+[Unit]
+Description=Kinima PostgreSQL daily backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=kinima
+Group=kinima
+SupplementaryGroups=docker
+WorkingDirectory=/opt/kinima/kinima-web
+EnvironmentFile=/etc/kinima/central.env
+ExecStart=/usr/bin/node /opt/kinima/kinima-web/scripts/backup-database.mjs
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/kinima/kinima-web/data
+UMask=0077

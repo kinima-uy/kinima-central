@@ -1,0 +1,5 @@
+# Reemplazá el dominio por uno cuyo DNS A/AAAA apunte a este servidor.
+kinima.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:4174
+}

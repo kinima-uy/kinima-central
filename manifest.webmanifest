@@ -1,0 +1,19 @@
+{
+  "name": "Kinima",
+  "short_name": "Kinima",
+  "description": "Ejercicio interactivo y registro local de sesiones.",
+  "lang": "es-UY",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F7F5EF",
+  "theme_color": "#F7F5EF",
+  "icons": [
+    {
+      "src": "kinima-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
