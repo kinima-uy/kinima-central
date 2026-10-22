@@ -26,4 +26,5 @@ export const crearAsignacion = f("crearAsignacion"), quitarAsignacion = f("quita
 export const agregarMeta = f("agregarMeta"), borrarMeta = f("borrarMeta"), enviarMensaje = f("enviarMensaje"), marcarLeidos = f("marcarLeidos");
 export const getProfesionales = f("getProfesionales"), setProfesionalActivo = f("setProfesionalActivo"), crearProfesional = f("crearProfesional");
 export const getAccesos = f("getAccesos"), darAccesoPaciente = f("darAccesoPaciente"), quitarAccesoPaciente = f("quitarAccesoPaciente"), darAccesoConsola = f("darAccesoConsola"), quitarAccesoConsola = f("quitarAccesoConsola");
+export const getFamiliasPaciente = f("getFamiliasPaciente"), crearFamilia = f("crearFamilia"), quitarAccesoFamilia = f("quitarAccesoFamilia");
 export const ZONAS = impl.ZONAS;

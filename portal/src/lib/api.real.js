@@ -164,6 +164,17 @@ export const quitarAccesoPaciente = (pacienteId, profesionalId) => req(`/admin/p
 export const darAccesoConsola = (consolaId, profesionalId) => req(`/admin/devices/${consolaId}/access`, { method: "PUT", body: { professionalId: profesionalId } });
 export const quitarAccesoConsola = (consolaId, profesionalId) => req(`/admin/devices/${consolaId}/access`, { method: "DELETE", body: { professionalId: profesionalId } });
 
+/* ---------- acceso familiar ---------- */
+export async function getFamiliasPaciente(patientId) {
+  const r = await req(`/professional/patients/${patientId}/family`);
+  return r.families.map((f) => ({ id: f.id, email: f.email, nombre: f.displayName }));
+}
+export async function crearFamilia({ pacienteId, email, nombre }) {
+  const r = await req("/professional/families", { method: "POST", body: { patientId: pacienteId, email: email.trim(), displayName: nombre.trim() } });
+  return { familia: { id: r.family.id, email: r.family.email, nombre: r.family.displayName }, temporaryPassword: r.temporaryPassword };
+}
+export const quitarAccesoFamilia = (pacienteId, familyId) => req(`/professional/patients/${pacienteId}/family-access`, { method: "DELETE", body: { familyId } });
+
 /* ---------- todavía sin lugar en la API (el portal oculta estas funciones) ---------- */
 const pronto = () => Promise.reject(new Error("Esta función todavía no está disponible con la base de datos real."));
 export const guardarNota = pronto, agregarMeta = pronto, borrarMeta = pronto, enviarMensaje = pronto, marcarLeidos = pronto, guardarPlantilla = pronto, setProfesionalActivo = pronto;

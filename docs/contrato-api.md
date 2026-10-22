@@ -35,6 +35,26 @@ Las rutas requieren token Bearer profesional y validan rol/acceso:
 
 Los pacientes deben usar códigos internos y etiquetas sin datos identificables directos.
 
+## Operación de la familia
+
+- Inicio de sesión: `POST /api/v1/family/auth/login` con `email` y `password`. Devuelve un token Bearer de ocho horas (mismo formato que el profesional, pero no da acceso a rutas `professional/` ni `admin/`).
+- La cuenta de familia la crea un profesional (no hay autorregistro): `POST /api/v1/professional/families` con `{ patientId, email, displayName }`, requiere acceso al paciente. Devuelve `temporaryPassword` una sola vez; se la pasa a la familia por un canal privado.
+
+| Método | Ruta | Acción |
+|---|---|---|
+| `GET` | `/api/v1/family/me` | Lee el perfil autenticado. |
+| `GET` | `/api/v1/family/patients` | Lista los pacientes (hijos) a los que tiene acceso. |
+| `GET` | `/api/v1/family/patients/{patientId}/assignment` | Rutina activa del paciente, o `null` si no hay. |
+| `GET` | `/api/v1/family/patients/{patientId}/sessions?limit=50` | Progreso: sesiones recientes (fecha, duración, aciertos, si se completó). |
+
+Gestión de acceso (lado profesional, requiere acceso al paciente):
+
+| Método | Ruta | Acción |
+|---|---|---|
+| `GET` | `/api/v1/professional/patients/{patientId}/family` | Lista las cuentas de familia vinculadas al paciente. |
+| `PUT` | `/api/v1/professional/patients/{patientId}/family-access` | Vincula una cuenta de familia existente (`{ familyId }`) a otro paciente (hermanos). |
+| `DELETE` | `/api/v1/professional/patients/{patientId}/family-access` | Revoca el acceso de esa familia a ese paciente. |
+
 ## Sincronización de consola
 
 ### `POST /api/v1/device/sync`

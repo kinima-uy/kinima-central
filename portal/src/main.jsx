@@ -2,8 +2,12 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, MemoryRouter, Routes, Route, Navigate, Link } from "react-router-dom";
 import { AuthProvider, RequireAuth } from "./lib/auth.jsx";
+import { AuthFamiliaProvider, RequireFamilia } from "./lib/authFamilia.jsx";
 import Layout from "./components/Layout.jsx";
+import LayoutFamilia from "./components/LayoutFamilia.jsx";
 import Login from "./pages/Login.jsx";
+import FamiliaLogin from "./pages/FamiliaLogin.jsx";
+import FamiliaInicio from "./pages/FamiliaInicio.jsx";
 import Pacientes from "./pages/Pacientes.jsx";
 import Paciente from "./pages/Paciente.jsx";
 import Asignar from "./pages/Asignar.jsx";
@@ -28,22 +32,28 @@ const Router = import.meta.env.VITE_PREVIEW ? MemoryRouter : BrowserRouter;
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <AuthProvider>
-      <Router>
-        <Routes>
-          <Route path="/ingresar" element={<Login />} />
-          <Route element={<RequireAuth><Layout /></RequireAuth>}>
-            <Route path="/" element={<Navigate to="/pacientes" replace />} />
-            <Route path="/pacientes" element={<Pacientes />} />
-            <Route path="/pacientes/:id" element={<Paciente />} />
-            <Route path="/pacientes/:id/informe" element={<Informe />} />
-            <Route path="/asignar" element={<Asignar />} />
-            <Route path="/ejercicios" element={<Ejercicios />} />
-            <Route path="/consolas" element={<Consolas />} />
-            <Route path="/profesionales" element={<RequireAuth admin><Profesionales /></RequireAuth>} />
+      <AuthFamiliaProvider>
+        <Router>
+          <Routes>
+            <Route path="/ingresar" element={<Login />} />
+            <Route element={<RequireAuth><Layout /></RequireAuth>}>
+              <Route path="/" element={<Navigate to="/pacientes" replace />} />
+              <Route path="/pacientes" element={<Pacientes />} />
+              <Route path="/pacientes/:id" element={<Paciente />} />
+              <Route path="/pacientes/:id/informe" element={<Informe />} />
+              <Route path="/asignar" element={<Asignar />} />
+              <Route path="/ejercicios" element={<Ejercicios />} />
+              <Route path="/consolas" element={<Consolas />} />
+              <Route path="/profesionales" element={<RequireAuth admin><Profesionales /></RequireAuth>} />
+            </Route>
+            <Route path="/familia/ingresar" element={<FamiliaLogin />} />
+            <Route element={<RequireFamilia><LayoutFamilia /></RequireFamilia>}>
+              <Route path="/familia" element={<FamiliaInicio />} />
+            </Route>
             <Route path="*" element={<div className="page"><Empty icon="alerta" title="Esta página no existe"><Link to="/pacientes">Volver a pacientes</Link></Empty></div>} />
-          </Route>
-        </Routes>
-      </Router>
+          </Routes>
+        </Router>
+      </AuthFamiliaProvider>
     </AuthProvider>
   </StrictMode>
 );

@@ -552,3 +552,20 @@ main:focus,main:focus-visible{outline:none}
 .chip button{display:inline-grid;place-items:center;width:28px;height:28px;border:0;border-radius:50%;background:transparent;color:var(--muted);cursor:pointer}
 .chip button:hover{background:var(--tint-coral);color:var(--coraltx)}
 .chips-list select{min-height:40px;border:2px dashed var(--line);border-radius:999px;background:var(--white);padding:0 12px;font:700 14px var(--body);color:var(--tealtx);cursor:pointer}
+
+/* ---------- acceso familiar (tarjeta en la ficha del paciente) ---------- */
+.familia-lista{list-style:none;margin:0 0 14px;padding:0;display:flex;flex-direction:column;gap:2px}
+.familia-lista li{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
+.familia-lista li:last-child{border-bottom:0}
+.familia-lista small{display:block;color:var(--muted)}
+.familia-form{display:flex;flex-direction:column;gap:12px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+
+/* ---------- app para familias: cabecera simple, sin menú lateral ---------- */
+.app-familia{display:block;min-height:100vh}
+.app-familia .topbar{display:flex!important;align-items:center;gap:12px;position:sticky;top:0;z-index:20;background:rgba(247,245,239,.94);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border-bottom:1px solid var(--line);padding:12px 20px}
+.app-familia .topbar .sb-tag{flex:1}
+.app-familia .topbar .icon-btn{flex:none}
+.familia-main{max-width:960px;margin:0 auto;padding:28px clamp(16px,4vw,40px) 64px;display:flex;flex-direction:column;gap:18px}
+.familia-saludo{font-size:20px;margin:0}
+.familia-rutina h3{margin:4px 0 8px;font:600 22px var(--display)}
+.familia-nums{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:16px}

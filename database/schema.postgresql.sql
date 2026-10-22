@@ -75,6 +75,25 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS sessions_patient_started_at ON sessions(patient_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS sessions_device_received_at ON sessions(device_id, received_at DESC);
 
+CREATE TABLE IF NOT EXISTS families (
+    id UUID PRIMARY KEY,
+    email TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    created_by UUID NOT NULL REFERENCES professionals(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    active BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS families_email_lower_unique ON families (lower(email));
+
+CREATE TABLE IF NOT EXISTS family_patient_access (
+    family_id UUID NOT NULL REFERENCES families(id),
+    patient_id UUID NOT NULL REFERENCES patients(id),
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (family_id, patient_id)
+);
+CREATE INDEX IF NOT EXISTS family_patient_access_patient ON family_patient_access(patient_id);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id UUID PRIMARY KEY,
     actor_professional_id UUID REFERENCES professionals(id),

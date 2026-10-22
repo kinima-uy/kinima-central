@@ -163,3 +163,16 @@ export const darAccesoPaciente = (pacienteId, profesionalId) => { if (!accesos.p
 export const quitarAccesoPaciente = (pacienteId, profesionalId) => quitar(accesos.pacientes, (a) => a.pacienteId === pacienteId && a.profesionalId === profesionalId);
 export const darAccesoConsola = (consolaId, profesionalId) => { if (!accesos.consolas.some((a) => a.consolaId === consolaId && a.profesionalId === profesionalId)) accesos.consolas.push({ profesionalId, consolaId, codigo: consolaId }); return wait({ ok: true }, 100); };
 export const quitarAccesoConsola = (consolaId, profesionalId) => quitar(accesos.consolas, (a) => a.consolaId === consolaId && a.profesionalId === profesionalId);
+
+/* ---------- acceso familiar (demo: en memoria, nada real) ---------- */
+const familias = {};
+export const getFamiliasPaciente = (pacienteId) => wait(familias[pacienteId] || [], 100);
+export function crearFamilia({ pacienteId, email, nombre }) {
+  const f = { id: `fam-${Date.now()}`, email, nombre };
+  familias[pacienteId] = [...(familias[pacienteId] || []), f];
+  return wait({ familia: f, temporaryPassword: "demo-" + Math.random().toString(36).slice(2, 8) }, 200);
+}
+export function quitarAccesoFamilia(pacienteId, familyId) {
+  familias[pacienteId] = (familias[pacienteId] || []).filter((f) => f.id !== familyId);
+  return wait({ ok: true }, 100);
+}

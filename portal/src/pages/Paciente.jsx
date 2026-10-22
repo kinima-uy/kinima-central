@@ -10,6 +10,62 @@ import { PageHead, Loading, ErrorBox, Icon, EstadoConsola, Empty } from "../comp
 import { CurvaProgreso, MapaAlcance, Semana, Cintas } from "../components/viz.jsx";
 import { Sugerencia, Metas, Familia, Rutina, Animo, diasTexto } from "../components/clinica.jsx";
 
+/* Cuentas de familia vinculadas a este paciente: ven su rutina y su progreso en /familia. */
+function AccesoFamiliar({ pacienteId }) {
+  const { data: familias, loading, reload } = useData(() => api.getFamiliasPaciente(pacienteId), [pacienteId]);
+  const [abierto, setAbierto] = useState(false);
+  const [f, setF] = useState({ nombre: "", email: "" });
+  const [creando, setCreando] = useState(false);
+  const [error, setError] = useState("");
+  const [nueva, setNueva] = useState(null); // { email, temporaryPassword } recién creada, se muestra una sola vez
+
+  const crear = async (e) => {
+    e.preventDefault();
+    if (f.nombre.trim().length < 2 || !f.email.trim()) { setError("Completá el nombre y el mail de la familia."); return; }
+    setCreando(true); setError("");
+    try {
+      const r = await api.crearFamilia({ pacienteId, nombre: f.nombre, email: f.email });
+      setNueva({ email: r.familia.email, temporaryPassword: r.temporaryPassword });
+      setF({ nombre: "", email: "" }); setAbierto(false);
+      reload();
+    } catch (err) { setError(err.message); } finally { setCreando(false); }
+  };
+  const quitar = async (familyId) => { await api.quitarAccesoFamilia(pacienteId, familyId); reload(); };
+
+  return (
+    <section className="card">
+      <div className="card-head"><h2><Icon name="equipo" size={18} />Acceso para la familia</h2></div>
+      {nueva && (
+        <p className="note-warn">
+          Cuenta creada para <b>{nueva.email}</b>. Contraseña temporal (se muestra una sola vez, pasásela por un canal privado): <code>{nueva.temporaryPassword}</code>
+        </p>
+      )}
+      {loading ? <Loading /> : (familias?.length ? (
+        <ul className="familia-lista">
+          {familias.map((fa) => (
+            <li key={fa.id}>
+              <div><b>{fa.nombre}</b><small className="muted">{fa.email}</small></div>
+              <button className="icon-btn" onClick={() => quitar(fa.id)} aria-label={`Quitar acceso a ${fa.nombre}`} title="Quitar acceso"><Icon name="cerrar" size={16} /></button>
+            </li>
+          ))}
+        </ul>
+      ) : <p className="muted small">Todavía no hay ninguna cuenta de familia vinculada.</p>)}
+
+      {abierto ? (
+        <form className="familia-form" onSubmit={crear}>
+          <label className="field"><span>Nombre de la familia</span><input value={f.nombre} onChange={(e) => setF({ ...f, nombre: e.target.value })} placeholder="Ej: Familia Pérez" /></label>
+          <label className="field"><span>Mail</span><input type="email" value={f.email} onChange={(e) => setF({ ...f, email: e.target.value })} placeholder="familia@mail.com" /></label>
+          {error && <p className="form-error" role="alert"><Icon name="alerta" size={16} />{error}</p>}
+          <div className="row-end">
+            <button type="button" className="btn btn-line btn-sm" onClick={() => setAbierto(false)}>Cancelar</button>
+            <button className="btn btn-navy btn-sm" disabled={creando}>{creando ? "Creando…" : "Crear acceso"}</button>
+          </div>
+        </form>
+      ) : <button className="btn btn-line btn-sm" onClick={() => setAbierto(true)}><Icon name="asignar" size={16} />Dar acceso a una familia</button>}
+    </section>
+  );
+}
+
 export default function Paciente() {
   const { id } = useParams();
   const { profesional } = useAuth();
@@ -92,6 +148,8 @@ export default function Paciente() {
             <Rutina a={a} />
             {p.consola && <div className="row-between"><span className="meta"><Icon name="consola" size={14} />{p.consola.codigo}</span><EstadoConsola estado={p.consola.estado} /></div>}
           </section>
+
+          <AccesoFamiliar pacienteId={p.id} />
 
           {CAP.notas && <section className="card">
             <div className="card-head"><h2><Icon name="nota" size={18} />Notas del profesional</h2></div>

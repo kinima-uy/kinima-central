@@ -105,6 +105,17 @@ async function device(req, res) {
   if (!result.rowCount) { fail(res, 401, 'device_unauthorized', 'La credencial de la consola no es válida.'); return null; }
   return result.rows[0];
 }
+async function family(req, res) {
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || ''); const token = match && verifyToken(match[1]);
+  if (!token) { fail(res, 401, 'unauthorized', 'Iniciá sesión para continuar.'); return null; }
+  const result = await pool.query('SELECT id,email,display_name FROM families WHERE id=$1 AND active=TRUE', [token.sub]);
+  if (!result.rowCount) { fail(res, 401, 'unauthorized', 'La cuenta no está activa.'); return null; }
+  return result.rows[0];
+}
+async function canFamilyAccessPatient(familyId, patientId) {
+  const found = await pool.query('SELECT 1 FROM family_patient_access WHERE family_id=$1 AND patient_id=$2', [familyId, patientId]);
+  return found.rowCount > 0;
+}
 async function audit(client, actorId, action, type, subjectId, details = {}, deviceId = null) {
   await client.query('INSERT INTO audit_events(id,actor_professional_id,device_id,action,subject_type,subject_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)',
     [randomUUID(), actorId, deviceId, action, type, subjectId, JSON.stringify(details)]);
@@ -155,6 +166,91 @@ async function login(input, req, res) {
   else if (!(await checkPassword(input.password, user.password_hash))) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, professional: { id: user.id, email: user.email, displayName: user.display_name, role: user.role } });
+}
+async function familyLogin(input, req, res) {
+  if (limited(req, res, 'family-login', 10, 15 * 60 * 1000)) return;
+  if (!validEmail(input.email) || typeof input.password !== 'string' || input.password.length > 128) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  const result = await pool.query('SELECT id,email,password_hash,display_name FROM families WHERE lower(email)=lower($1) AND active=TRUE', [input.email.trim()]);
+  const user = result.rows[0];
+  if (!user) await scrypt(input.password, 'kinima-constant-login-salt', 64);
+  else if (!(await checkPassword(input.password, user.password_hash))) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, family: { id: user.id, email: user.email, displayName: user.display_name } });
+}
+async function createFamily(input, actor, res) {
+  if (!validUuid(input.patientId) || !(await canAccessPatient(actor, input.patientId))) { fail(res, 403, 'forbidden', 'No tenés acceso a ese paciente.'); return; }
+  if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100) {
+    fail(res, 400, 'invalid_input', 'Revisá el correo y el nombre de la familia.'); return;
+  }
+  const id = randomUUID(); const temporaryPassword = randomBytes(9).toString('base64url'); const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('INSERT INTO families(id,email,password_hash,display_name,created_by) VALUES($1,lower($2),$3,$4,$5)',
+      [id, input.email.trim(), await hashPassword(temporaryPassword), input.displayName.trim(), actor.id]);
+    await client.query('INSERT INTO family_patient_access(family_id,patient_id) VALUES($1,$2)', [id, input.patientId]);
+    await audit(client, actor.id, 'family.created', 'family', id, { email: input.email.trim().toLowerCase(), patientId: input.patientId });
+    await client.query('COMMIT');
+    json(res, 201, { family: { id, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim() }, temporaryPassword });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta de familia con ese correo.'); return; }
+    throw error;
+  } finally { client.release(); }
+}
+async function listPatientFamilies(actor, patientId, res) {
+  if (!validUuid(patientId) || !(await canAccessPatient(actor, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+  const result = await pool.query(`SELECT f.id,f.email,f.display_name FROM family_patient_access a
+    JOIN families f ON f.id=a.family_id AND f.active=TRUE WHERE a.patient_id=$1 ORDER BY f.display_name`, [patientId]);
+  json(res, 200, { families: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name })) });
+}
+async function grantFamilyAccess(input, actor, patientId, res) {
+  if (!validUuid(patientId) || !validUuid(input.familyId) || !(await canAccessPatient(actor, patientId))) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const result = await pool.query(`INSERT INTO family_patient_access(family_id,patient_id)
+    SELECT f.id,pt.id FROM families f,patients pt WHERE f.id=$1 AND f.active=TRUE AND pt.id=$2 AND pt.active=TRUE
+    ON CONFLICT DO NOTHING RETURNING patient_id`, [input.familyId, patientId]);
+  if (!result.rowCount) {
+    const existing = await pool.query(`SELECT 1 FROM family_patient_access a
+      JOIN families f ON f.id=a.family_id AND f.active=TRUE
+      JOIN patients pt ON pt.id=a.patient_id AND pt.active=TRUE
+      WHERE a.family_id=$1 AND a.patient_id=$2`, [input.familyId, patientId]);
+    if (!existing.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta de familia o el paciente.'); return; }
+    json(res, 200, { granted: true });
+    return;
+  }
+  await pool.query('INSERT INTO audit_events(id,actor_professional_id,action,subject_type,subject_id,details) VALUES($1,$2,$3,$4,$5,$6::jsonb)',
+    [randomUUID(), actor.id, 'family.access.granted', 'patient', patientId, JSON.stringify({ familyId: input.familyId })]);
+  json(res, 200, { granted: true });
+}
+async function revokeFamilyAccess(input, actor, patientId, res) {
+  if (!validUuid(patientId) || !validUuid(input.familyId) || !(await canAccessPatient(actor, patientId))) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const removed = await client.query('DELETE FROM family_patient_access WHERE family_id=$1 AND patient_id=$2 RETURNING patient_id', [input.familyId, patientId]);
+    if (!removed.rowCount) { await client.query('ROLLBACK'); fail(res, 404, 'not_found', 'No se encontró ese acceso.'); return; }
+    await audit(client, actor.id, 'family.access.revoked', 'patient', patientId, { familyId: input.familyId });
+    await client.query('COMMIT');
+    json(res, 200, { revoked: true });
+  } catch (error) {
+    await client.query('ROLLBACK'); throw error;
+  } finally { client.release(); }
+}
+async function listFamilyPatients(actor, res) {
+  const result = await pool.query(`SELECT p.id,p.local_code,p.display_label FROM family_patient_access a
+    JOIN patients p ON p.id=a.patient_id AND p.active=TRUE WHERE a.family_id=$1 ORDER BY p.local_code`, [actor.id]);
+  json(res, 200, { patients: result.rows.map((row) => ({ id: row.id, localCode: row.local_code, displayLabel: row.display_label })) });
+}
+async function familyPatientAssignment(actor, patientId, res) {
+  if (!validUuid(patientId) || !(await canFamilyAccessPatient(actor.id, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+  const result = await pool.query(`SELECT version,exercise_config,created_at FROM assignments WHERE patient_id=$1 AND status='active' LIMIT 1`, [patientId]);
+  const row = result.rows[0];
+  json(res, 200, { assignment: row ? { version: Number(row.version), exercise: row.exercise_config, createdAt: row.created_at } : null });
+}
+async function familyPatientSessions(actor, patientId, url, res) {
+  if (!validUuid(patientId) || !(await canFamilyAccessPatient(actor.id, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+  const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+  const result = await pool.query(`SELECT id,started_at,duration_seconds,elapsed_seconds,hits,completed FROM sessions WHERE patient_id=$1 ORDER BY started_at DESC LIMIT $2`, [patientId, limit]);
+  json(res, 200, { sessions: result.rows.map((row) => ({ id: row.id, startedAt: row.started_at, durationSeconds: row.duration_seconds, elapsedSeconds: row.elapsed_seconds, hits: row.hits, completed: row.completed })) });
 }
 async function createProfessional(input, actor, res) {
   if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede crear usuarios.'); return; }
@@ -458,6 +554,17 @@ async function route(req, res) {
     await bootstrapAdmin(input, res); return;
   }
   if (req.method === 'POST' && path === '/api/v1/auth/login') { await login(await body(req), req, res); return; }
+  if (req.method === 'POST' && path === '/api/v1/family/auth/login') { await familyLogin(await body(req), req, res); return; }
+
+  if (path.startsWith('/api/v1/family/')) {
+    const actor = await family(req, res); if (!actor) return;
+    const suffix = path.slice('/api/v1/family/'.length);
+    if (req.method === 'GET' && suffix === 'me') { json(res, 200, { family: { id: actor.id, email: actor.email, displayName: actor.display_name } }); return; }
+    if (req.method === 'GET' && suffix === 'patients') { await listFamilyPatients(actor, res); return; }
+    if (req.method === 'GET' && /^patients\/[0-9a-f-]+\/assignment$/.test(suffix)) { await familyPatientAssignment(actor, suffix.split('/')[1], res); return; }
+    if (req.method === 'GET' && /^patients\/[0-9a-f-]+\/sessions$/.test(suffix)) { await familyPatientSessions(actor, suffix.split('/')[1], url, res); return; }
+    fail(res, 404, 'not_found', 'No se encontró esta ruta.'); return;
+  }
 
   if (req.method === 'POST' && path === '/api/v1/device/sync') {
     const deviceRow = await device(req, res); if (!deviceRow) return;
@@ -488,6 +595,13 @@ async function route(req, res) {
     }
     if (req.method === 'DELETE' && /^professional\/assignments\/[0-9a-f-]+$/.test(suffix)) {
       await revokeAssignment(actor, suffix.split('/')[2], res); return;
+    }
+    if (req.method === 'POST' && suffix === 'professional/families') { await createFamily(await body(req), actor, res); return; }
+    if (req.method === 'GET' && /^professional\/patients\/[0-9a-f-]+\/family$/.test(suffix)) { await listPatientFamilies(actor, suffix.split('/')[2], res); return; }
+    const patientFamilyAccess = suffix.split('/');
+    if (patientFamilyAccess.length === 4 && patientFamilyAccess[0] === 'professional' && patientFamilyAccess[1] === 'patients' && validUuid(patientFamilyAccess[2]) && patientFamilyAccess[3] === 'family-access') {
+      if (req.method === 'PUT') { await grantFamilyAccess(await body(req), actor, patientFamilyAccess[2], res); return; }
+      if (req.method === 'DELETE') { await revokeFamilyAccess(await body(req), actor, patientFamilyAccess[2], res); return; }
     }
     if (req.method === 'GET' && suffix === 'admin/professionals') { await listProfessionals(actor, res); return; }
     if (req.method === 'GET' && suffix === 'admin/access') { await listAccess(actor, res); return; }
