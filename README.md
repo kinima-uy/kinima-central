@@ -30,7 +30,7 @@ Necesitás Node.js 22 o posterior, una base PostgreSQL administrada y su URL de 
 6. Ejecutá `npm run dev`. Esto prepara los archivos del portal y levanta la API en `http://127.0.0.1:4174`.
 7. Abrí `http://127.0.0.1:4174/` para usar el portal. Para trabajar en el diseño con recarga automática, en otra terminal ejecutá `npm run dev:portal` y abrí `http://localhost:5173` (usa la misma API).
 
-Para ejecutar además la consola local, abrí otra terminal y ejecutá `npm run device`. La consola aparece en `http://127.0.0.1:4173`. Para sincronizar con el servidor publicado, su archivo privado debe tener `KINIMA_API_BASE_URL` apuntando a la dirección HTTPS de Vercel y las credenciales de esa consola.
+Para ejecutar además la consola local, abrí otra terminal y ejecutá `npm run device`. El juego de la Raspberry aparece en `http://127.0.0.1:4173/device/`. Para sincronizar con el servidor publicado, su archivo privado debe tener `KINIMA_API_BASE_URL` apuntando a la dirección HTTPS de Vercel y las credenciales de esa consola.
 
 ## Portal (carpeta `portal/`)
 

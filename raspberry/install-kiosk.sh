@@ -15,8 +15,10 @@ if [[ ! -f "$PROJECT_DIR/.env" ]]; then
   echo "Falta $PROJECT_DIR/.env; completalo antes de instalar." >&2
   exit 1
 fi
-if ! grep -Eq '^KINIMA_API_BASE_URL=https://' "$PROJECT_DIR/.env" || ! grep -Eq '^KINIMA_DEVICE_TOKEN=.{20,}$' "$PROJECT_DIR/.env"; then
-  echo "Configurá KINIMA_API_BASE_URL con HTTPS y KINIMA_DEVICE_TOKEN en .env antes de instalar." >&2
+if ! grep -Eq '^KINIMA_API_BASE_URL=https://' "$PROJECT_DIR/.env" || \
+   ! grep -Eq '^KINIMA_DEVICE_ID=[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' "$PROJECT_DIR/.env" || \
+   ! grep -Eq '^KINIMA_DEVICE_TOKEN=.{20,}$' "$PROJECT_DIR/.env"; then
+  echo "Configurá el dominio HTTPS, KINIMA_DEVICE_ID y KINIMA_DEVICE_TOKEN en .env con los datos del portal." >&2
   exit 1
 fi
 if ! grep -Eq '^DEVICE_DATA_KEY=[A-Za-z0-9_-]{43}$' "$PROJECT_DIR/.env"; then
@@ -93,7 +95,7 @@ if [[ -f "$AUTOSTART" ]]; then
 fi
 cat >> "$AUTOSTART" <<EOF
 $MARKER_BEGIN
-(while true; do sleep 3; curl --silent --fail http://127.0.0.1:4173/api/local/bootstrap >/dev/null || { sleep 3; continue; }; $CHROMIUM_BIN --kiosk --no-first-run --noerrdialogs --disable-infobars http://127.0.0.1:4173; sleep 2; done) &
+  (while true; do sleep 3; curl --silent --fail http://127.0.0.1:4173/api/local/bootstrap >/dev/null || { sleep 3; continue; }; $CHROMIUM_BIN --kiosk --no-first-run --noerrdialogs --disable-infobars http://127.0.0.1:4173/device/; sleep 2; done) &
 $MARKER_END
 EOF
 

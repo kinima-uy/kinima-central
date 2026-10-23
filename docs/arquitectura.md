@@ -3,8 +3,8 @@
 ## Piezas del sistema
 
 1. **Consola familiar:** corre en la computadora o Raspberry Pi. MediaPipe detecta la punta del índice; el video se procesa en el dispositivo y no se guarda ni se transmite.
-2. **Servicio local de la consola** (`device/index.js`): muestra el ejercicio, guarda sesiones cifradas en SQLite y las envía cuando hay conexión.
-3. **Portal profesional** (`professional/`): permite crear cuentas, pacientes con códigos internos, consolas, asignaciones y consultar sesiones.
+2. **Servicio local de la consola** (`device/index.js`): sirve el juego web en `/device/`, guarda sesiones cifradas en SQLite y las envía cuando hay conexión.
+3. **Portal profesional** (`portal/`, React): permite crear cuentas, pacientes con códigos internos, consolas, asignaciones y consultar sesiones. `professional/` conserva la versión anterior del portal.
 4. **API central Express** (`server/index.js`): valida usuarios y consolas, controla permisos y recibe asignaciones e historial.
 5. **Vercel:** publica el portal y ejecuta la API como función Node. La función despierta para atender solicitudes y puede escalar con el uso; no es un proceso de Node encendido continuamente.
 6. **PostgreSQL administrado:** guarda cuentas profesionales, pacientes, consolas, accesos, asignaciones, sesiones y auditoría. Puede crearse desde la integración de Neon en Vercel Marketplace o conectarse desde otro proveedor PostgreSQL.
