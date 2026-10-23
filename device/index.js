@@ -19,6 +19,8 @@ const DB_PATH = resolve(process.cwd(), process.env.DEVICE_DB_PATH || './data/kin
 const MAX_BODY = 96 * 1024;
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.wasm': 'application/wasm', '.task': 'application/octet-stream', '.png': 'image/png', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.webmanifest': 'application/manifest+json' };
 const STATIC = new Map([
+  ['/device/', ['device/web/index.html', '.html']], ['/device/index.html', ['device/web/index.html', '.html']],
+  ['/device/style.css', ['device/web/style.css', '.css']], ['/device/app.js', ['device/web/app.js', '.js']],
   ['/', ['index.html', '.html']], ['/index.html', ['index.html', '.html']], ['/app.js', ['app.js', '.js']],
   ['/style.css', ['style.css', '.css']], ['/local-store.js', ['local-store.js', '.js']],
   ['/service-worker.js', ['service-worker.js', '.js']], ['/manifest.webmanifest', ['manifest.webmanifest', '.webmanifest']],
