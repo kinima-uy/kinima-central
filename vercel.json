@@ -7,15 +7,25 @@
       "source": "/professional",
       "destination": "/professional/",
       "permanent": false
+    },
+    {
+      "source": "/",
+      "has": [{ "type": "host", "value": "familias.kinima.uy" }],
+      "destination": "/familia/ingresar",
+      "permanent": false
     }
   ],
   "rewrites": [
     {
-      "source": "/",
+      "source": "/ingresar",
       "destination": "/index.html"
     },
     {
-      "source": "/ingresar",
+      "source": "/familia",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/familia/:path*",
       "destination": "/index.html"
     },
     {
