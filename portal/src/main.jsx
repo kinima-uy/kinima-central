@@ -29,6 +29,20 @@ import "./styles.css";
 /* En la web publicada (portal.kinima.uy) se usa BrowserRouter. La vista previa usa MemoryRouter. */
 const Router = import.meta.env.VITE_PREVIEW ? MemoryRouter : BrowserRouter;
 
+/* App instalable (PWA) solo para la familia (/familia): no cambia nada para el portal profesional.
+   Va acá (no en un <script> suelto de index.html) porque el CSP del servidor solo permite scripts propios del bundle. */
+if (location.pathname.startsWith("/familia")) {
+  const link = document.createElement("link");
+  link.rel = "manifest";
+  link.href = "/manifest-familia.webmanifest";
+  document.head.appendChild(link);
+  document.title = "Kinima · Familias";
+  document.head.insertAdjacentHTML(
+    "beforeend",
+    '<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Kinima">'
+  );
+}
+
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <AuthProvider>
