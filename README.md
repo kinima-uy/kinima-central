@@ -1,6 +1,6 @@
 # Kinima
 
-Kinima tiene una consola de ejercicio para la familia, un portal para profesionales y un servidor central. La cámara se procesa en la consola: el video no se envía ni se guarda.
+Kinima tiene una consola de ejercicio para la familia, un portal para profesionales y un servidor central. La cámara se procesa en la consola: el video no se envía ni se guarda..
 
 ## Cómo viajan los datos
 
