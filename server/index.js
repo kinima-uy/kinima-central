@@ -21,6 +21,24 @@ const TOKEN_TTL = 8 * 60 * 60;
 
 if (JWT_SECRET.length < 32) throw new Error('JWT_SECRET debe tener al menos 32 caracteres aleatorios.');
 
+// El backend es independiente del portal y de la app de familias (cada uno es su propio repo y
+// deploy), así que las llamadas desde esos dominios son "cross-origin" y necesitan CORS.
+const ALLOWED_ORIGINS = new Set([
+  'https://portal.kinima.uy',
+  'https://familias.kinima.uy',
+  'http://localhost:5173',
+  'http://localhost:4173',
+]);
+function cors(req, res) {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader('access-control-allow-origin', origin);
+    res.setHeader('vary', 'Origin');
+    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('access-control-allow-headers', 'Content-Type, Authorization');
+    res.setHeader('access-control-max-age', '600');
+  }
+}
 function json(res, status, value) {
   const text = JSON.stringify(value);
   res.writeHead(status, {
@@ -29,7 +47,7 @@ function json(res, status, value) {
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
-    'cross-origin-resource-policy': 'same-origin'
+    'cross-origin-resource-policy': 'cross-origin'
   });
   res.end(text);
 }
@@ -627,7 +645,8 @@ async function route(req, res) {
 
 const app = express();
 app.disable('x-powered-by');
-app.use((req, res, next) => { headers(res); next(); });
+app.use((req, res, next) => { headers(res); cors(req, res); next(); });
+app.use((req, res, next) => (req.method === 'OPTIONS' ? res.writeHead(204).end() : next()));
 app.use(express.json({ limit: MAX_BODY_BYTES, strict: true }));
 // Portal anterior (HTML simple de Caro), disponible en /professional/ para tareas de administración.
 app.use((req, res, next) => (req.method === 'GET' && req.originalUrl === '/professional') ? res.redirect(302, '/professional/') : next());

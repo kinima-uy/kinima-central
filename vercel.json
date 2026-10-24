@@ -1,60 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "express",
-  "buildCommand": "npm run build",
   "redirects": [
     {
       "source": "/professional",
       "destination": "/professional/",
       "permanent": false
-    },
-    {
-      "source": "/",
-      "has": [{ "type": "host", "value": "familias.kinima.uy" }],
-      "destination": "/familia/ingresar",
-      "permanent": false
-    }
-  ],
-  "rewrites": [
-    {
-      "source": "/ingresar",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/familia",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/familia/:path*",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/configurar",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/pacientes",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/pacientes/:path*",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/asignar",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/ejercicios",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/consolas",
-      "destination": "/index.html"
-    },
-    {
-      "source": "/profesionales",
-      "destination": "/index.html"
     }
   ]
 }

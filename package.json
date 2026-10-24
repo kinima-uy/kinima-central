@@ -7,9 +7,8 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "build": "vite build --config portal/vite.config.js && node scripts/build-vercel-assets.mjs",
+    "build": "node scripts/build-vercel-assets.mjs",
     "dev": "node scripts/dev-local.mjs",
-    "dev:portal": "vite --config portal/vite.config.js",
     "start": "node scripts/run-server.mjs",
     "db:migrate": "node scripts/run-migrate.mjs",
     "server": "node scripts/run-server.mjs",
