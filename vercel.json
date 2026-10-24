@@ -1,11 +1,4 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": "express",
-  "redirects": [
-    {
-      "source": "/professional",
-      "destination": "/professional/",
-      "permanent": false
-    }
-  ]
+  "framework": "express"
 }

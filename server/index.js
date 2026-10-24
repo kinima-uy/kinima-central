@@ -1,6 +1,5 @@
 import express from 'express';
 import { dirname, resolve } from 'node:path';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, randomUUID, createHash, createHmac, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -14,7 +13,6 @@ const JWT_SECRET = process.env.JWT_SECRET || '';
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || '';
 const PRODUCTION = process.env.NODE_ENV === 'production';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const PUBLIC_DIR = resolve(ROOT, 'public');
 const LIMITS = new Map();
 const MAX_BODY_BYTES = 512 * 1024;
 const TOKEN_TTL = 8 * 60 * 60;
@@ -648,23 +646,8 @@ app.disable('x-powered-by');
 app.use((req, res, next) => { headers(res); cors(req, res); next(); });
 app.use((req, res, next) => (req.method === 'OPTIONS' ? res.writeHead(204).end() : next()));
 app.use(express.json({ limit: MAX_BODY_BYTES, strict: true }));
-// Portal anterior (HTML simple de Caro), disponible en /professional/ para tareas de administración.
-app.use((req, res, next) => (req.method === 'GET' && req.originalUrl === '/professional') ? res.redirect(302, '/professional/') : next());
-app.use('/professional', express.static(resolve(PUBLIC_DIR, 'professional'), { index: 'index.html', redirect: false, setHeaders(res) { res.setHeader('cache-control', 'no-store'); } }));
-app.use(express.static(PUBLIC_DIR, {
-  index: false,
-  redirect: false,
-  setHeaders(res) { res.setHeader('cache-control', 'no-store'); }
-}));
-// Portal (React): las rutas que no son archivos ni API devuelven index.html para que el navegador
-// resuelva la pantalla (por ejemplo /pacientes/123). En Vercel lo hacen los rewrites de vercel.json.
-app.use((req, res, next) => {
-  if (req.method !== 'GET' || req.path.startsWith('/api/') || req.path.startsWith('/professional/') || !req.accepts('html')) return next();
-  const index = resolve(PUBLIC_DIR, 'index.html');
-  if (!existsSync(index)) return next();
-  res.setHeader('cache-control', 'no-store');
-  res.sendFile(index);
-});
+// kinima-central es solo la API (REST). El portal y la app de familias son repos/deploys
+// aparte que llaman a este backend por HTTPS, así que acá no se sirve ningún HTML ni estático.
 app.use((req, res, next) => {
   Promise.resolve(route(req, res)).catch((error) => {
     console.error('Kinima API request failed:', error.message);
