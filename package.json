@@ -1,5 +1,5 @@
 {
-  "name": "kinima-ecosystem",
+  "name": "kinima-central",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,25 +7,14 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "build": "node scripts/build-vercel-assets.mjs",
-    "dev": "node scripts/dev-local.mjs",
+    "build": "node -e \"console.log('kinima-central es solo la API, no necesita build')\"",
+    "dev": "node scripts/run-server.mjs",
     "start": "node scripts/run-server.mjs",
     "db:migrate": "node scripts/run-migrate.mjs",
-    "server": "node scripts/run-server.mjs",
-    "device": "node scripts/run-device.mjs"
+    "server": "node scripts/run-server.mjs"
   },
   "dependencies": {
-    "@mediapipe/tasks-vision": "0.10.35",
     "express": "^5.3.0",
-    "pg": "^8.23.1",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "react-router-dom": "6.26.2",
-    "@fontsource/fredoka": "5.1.0",
-    "@fontsource/nunito": "5.1.0"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "4.3.1",
-    "vite": "5.4.8"
+    "pg": "^8.23.1"
   }
 }
