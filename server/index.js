@@ -251,6 +251,25 @@ async function revokeFamilyAccess(input, actor, patientId, res) {
     await client.query('ROLLBACK'); throw error;
   } finally { client.release(); }
 }
+async function listPatientMessages(patientId, res) {
+  const result = await pool.query(`SELECT m.id,m.sender_type,m.body,m.created_at,m.read_at,pr.display_name AS autor
+    FROM messages m LEFT JOIN professionals pr ON pr.id=m.sender_professional_id WHERE m.patient_id=$1 ORDER BY m.created_at`, [patientId]);
+  json(res, 200, { messages: result.rows.map((row) => ({ id: row.id, de: row.sender_type, texto: row.body, fecha: row.created_at, leido: row.read_at !== null, autor: row.autor })) });
+}
+async function sendPatientMessage(input, patientId, senderType, senderId, res) {
+  const texto = typeof input.texto === 'string' ? input.texto.trim() : '';
+  if (texto.length < 1 || texto.length > 2000) { fail(res, 400, 'invalid_input', 'Escribí un mensaje de hasta 2000 caracteres.'); return; }
+  const id = randomUUID(); const column = senderType === 'familia' ? 'sender_family_id' : 'sender_professional_id';
+  const result = await pool.query(`INSERT INTO messages(id,patient_id,sender_type,${column},body) VALUES($1,$2,$3,$4,$5) RETURNING created_at`,
+    [id, patientId, senderType, senderId, texto]);
+  const autor = senderType === 'profesional' && typeof input.autor === 'string' ? input.autor.trim().slice(0, 100) : null;
+  json(res, 201, { mensaje: { id, de: senderType, texto, fecha: result.rows[0].created_at, leido: false, autor } });
+}
+async function markPatientMessagesRead(patientId, readerType, res) {
+  const fromType = readerType === 'familia' ? 'profesional' : 'familia';
+  await pool.query(`UPDATE messages SET read_at=now() WHERE patient_id=$1 AND sender_type=$2 AND read_at IS NULL`, [patientId, fromType]);
+  json(res, 200, { ok: true });
+}
 async function listFamilyPatients(actor, res) {
   const result = await pool.query(`SELECT p.id,p.local_code,p.display_label FROM family_patient_access a
     JOIN patients p ON p.id=a.patient_id AND p.active=TRUE WHERE a.family_id=$1 ORDER BY p.local_code`, [actor.id]);
@@ -416,10 +435,14 @@ async function revokeDeviceAccess(input, actor, deviceId, res) {
 }
 async function listPatients(actor, res) {
   const result = actor.role === 'administrator'
-    ? await pool.query('SELECT id,local_code,display_label,created_at FROM patients WHERE active=TRUE ORDER BY local_code')
-    : await pool.query(`SELECT p.id,p.local_code,p.display_label,p.created_at FROM patients p
-       JOIN professional_patient_access a ON a.patient_id=p.id WHERE a.professional_id=$1 AND p.active=TRUE ORDER BY p.local_code`, [actor.id]);
-  json(res, 200, { patients: result.rows.map((row) => ({ id: row.id, localCode: row.local_code, displayLabel: row.display_label, createdAt: row.created_at })) });
+    ? await pool.query(`SELECT p.id,p.local_code,p.display_label,p.created_at,
+         (SELECT COUNT(*)::integer FROM messages m WHERE m.patient_id=p.id AND m.sender_type='familia' AND m.read_at IS NULL) AS sin_leer
+       FROM patients p WHERE p.active=TRUE ORDER BY p.local_code`)
+    : await pool.query(`SELECT p.id,p.local_code,p.display_label,p.created_at,
+         (SELECT COUNT(*)::integer FROM messages m WHERE m.patient_id=p.id AND m.sender_type='familia' AND m.read_at IS NULL) AS sin_leer
+       FROM patients p JOIN professional_patient_access a ON a.patient_id=p.id
+       WHERE a.professional_id=$1 AND p.active=TRUE ORDER BY p.local_code`, [actor.id]);
+  json(res, 200, { patients: result.rows.map((row) => ({ id: row.id, localCode: row.local_code, displayLabel: row.display_label, createdAt: row.created_at, sinLeer: row.sin_leer })) });
 }
 async function listDevices(actor, res) {
   const query = actor.role === 'administrator'
@@ -579,6 +602,21 @@ async function route(req, res) {
     if (req.method === 'GET' && suffix === 'patients') { await listFamilyPatients(actor, res); return; }
     if (req.method === 'GET' && /^patients\/[0-9a-f-]+\/assignment$/.test(suffix)) { await familyPatientAssignment(actor, suffix.split('/')[1], res); return; }
     if (req.method === 'GET' && /^patients\/[0-9a-f-]+\/sessions$/.test(suffix)) { await familyPatientSessions(actor, suffix.split('/')[1], url, res); return; }
+    if (req.method === 'GET' && /^patients\/[0-9a-f-]+\/messages$/.test(suffix)) {
+      const patientId = suffix.split('/')[1];
+      if (!validUuid(patientId) || !(await canFamilyAccessPatient(actor.id, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+      await listPatientMessages(patientId, res); return;
+    }
+    if (req.method === 'POST' && /^patients\/[0-9a-f-]+\/messages$/.test(suffix)) {
+      const patientId = suffix.split('/')[1];
+      if (!validUuid(patientId) || !(await canFamilyAccessPatient(actor.id, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+      await sendPatientMessage(await body(req), patientId, 'familia', actor.id, res); return;
+    }
+    if (req.method === 'POST' && /^patients\/[0-9a-f-]+\/messages\/read$/.test(suffix)) {
+      const patientId = suffix.split('/')[1];
+      if (!validUuid(patientId) || !(await canFamilyAccessPatient(actor.id, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+      await markPatientMessagesRead(patientId, 'familia', res); return;
+    }
     fail(res, 404, 'not_found', 'No se encontró esta ruta.'); return;
   }
 
@@ -614,6 +652,21 @@ async function route(req, res) {
     }
     if (req.method === 'POST' && suffix === 'professional/families') { await createFamily(await body(req), actor, res); return; }
     if (req.method === 'GET' && /^professional\/patients\/[0-9a-f-]+\/family$/.test(suffix)) { await listPatientFamilies(actor, suffix.split('/')[2], res); return; }
+    if (req.method === 'GET' && /^professional\/patients\/[0-9a-f-]+\/messages$/.test(suffix)) {
+      const patientId = suffix.split('/')[2];
+      if (!validUuid(patientId) || !(await canAccessPatient(actor, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+      await listPatientMessages(patientId, res); return;
+    }
+    if (req.method === 'POST' && /^professional\/patients\/[0-9a-f-]+\/messages$/.test(suffix)) {
+      const patientId = suffix.split('/')[2];
+      if (!validUuid(patientId) || !(await canAccessPatient(actor, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+      await sendPatientMessage(await body(req), patientId, 'profesional', actor.id, res); return;
+    }
+    if (req.method === 'POST' && /^professional\/patients\/[0-9a-f-]+\/messages\/read$/.test(suffix)) {
+      const patientId = suffix.split('/')[2];
+      if (!validUuid(patientId) || !(await canAccessPatient(actor, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+      await markPatientMessagesRead(patientId, 'profesional', res); return;
+    }
     const patientFamilyAccess = suffix.split('/');
     if (patientFamilyAccess.length === 4 && patientFamilyAccess[0] === 'professional' && patientFamilyAccess[1] === 'patients' && validUuid(patientFamilyAccess[2]) && patientFamilyAccess[3] === 'family-access') {
       if (req.method === 'PUT') { await grantFamilyAccess(await body(req), actor, patientFamilyAccess[2], res); return; }

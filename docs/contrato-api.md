@@ -23,6 +23,8 @@ Las rutas requieren token Bearer profesional y validan rol/acceso:
 | `DELETE` | `/api/v1/professional/assignments/{deviceId}` | Revoca la asignación vigente. |
 | `GET` | `/api/v1/professional/patients/{patientId}/sessions?limit=100` | Consulta sesiones recibidas, limitado a pacientes autorizados. |
 | `GET` | `/api/v1/professional/patients/{patientId}/assignments` | Historial de rutinas del paciente (todas las versiones y consolas), limitado a pacientes autorizados. |
+| `GET`, `POST` | `/api/v1/professional/patients/{patientId}/messages` | Lista o envía mensajes con la familia del paciente. |
+| `POST` | `/api/v1/professional/patients/{patientId}/messages/read` | Marca como leídos los mensajes que mandó la familia. |
 | `POST` | `/api/v1/admin/devices` | Registra una consola y devuelve su token una vez (administrador). |
 | `POST` | `/api/v1/admin/devices/{deviceId}/rotate-token` | Revoca el token previo y devuelve una credencial nueva una sola vez (administrador). |
 | `POST` | `/api/v1/admin/professionals` | Crea una cuenta profesional (administrador). |
@@ -46,6 +48,8 @@ Los pacientes deben usar códigos internos y etiquetas sin datos identificables 
 | `GET` | `/api/v1/family/patients` | Lista los pacientes (hijos) a los que tiene acceso. |
 | `GET` | `/api/v1/family/patients/{patientId}/assignment` | Rutina activa del paciente, o `null` si no hay. |
 | `GET` | `/api/v1/family/patients/{patientId}/sessions?limit=50` | Progreso: sesiones recientes (fecha, duración, aciertos, si se completó). |
+| `GET`, `POST` | `/api/v1/family/patients/{patientId}/messages` | Lista o envía mensajes con el equipo profesional. |
+| `POST` | `/api/v1/family/patients/{patientId}/messages/read` | Marca como leídos los mensajes que mandó el profesional. |
 
 Gestión de acceso (lado profesional, requiere acceso al paciente):
 

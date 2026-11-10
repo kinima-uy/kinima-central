@@ -94,6 +94,20 @@ CREATE TABLE IF NOT EXISTS family_patient_access (
 );
 CREATE INDEX IF NOT EXISTS family_patient_access_patient ON family_patient_access(patient_id);
 
+-- Mensajes entre la familia y el equipo profesional, por paciente.
+CREATE TABLE IF NOT EXISTS messages (
+    id UUID PRIMARY KEY,
+    patient_id UUID NOT NULL REFERENCES patients(id),
+    sender_type TEXT NOT NULL CHECK (sender_type IN ('familia', 'profesional')),
+    sender_family_id UUID REFERENCES families(id),
+    sender_professional_id UUID REFERENCES professionals(id),
+    body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    read_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS messages_patient_created_at ON messages(patient_id, created_at);
+CREATE INDEX IF NOT EXISTS messages_patient_unread ON messages(patient_id, sender_type) WHERE read_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS audit_events (
     id UUID PRIMARY KEY,
     actor_professional_id UUID REFERENCES professionals(id),

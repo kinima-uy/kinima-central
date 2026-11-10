@@ -30,7 +30,6 @@ Se juntó el backend de Caro (API Express + PostgreSQL + consola) con el portal 
 
 Para que con la API real funcione todo lo del diseño faltan tablas y rutas para:
 
-- mensajes con la familia;
 - objetivos terapéuticos;
 - notas del profesional;
 - días de la semana y varios bloques por rutina;

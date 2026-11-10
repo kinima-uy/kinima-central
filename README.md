@@ -36,7 +36,7 @@ Para ejecutar además la consola local, abrí otra terminal y ejecutá `npm run 
 
 - `portal/src/lib/api.js` elige de dónde salen los datos: la **API real** (por defecto) o el **modo demo** con datos de prueba (`VITE_MODO=demo`), que sirve para presentaciones.
 - `portal/src/lib/api.real.js` traduce la API (`/api/v1`) al formato que usan las pantallas. `portal/src/data/ejercicios.js` traduce la configuración del ejercicio (tamaño, zona, alcance, duración) a los valores que lee la consola.
-- Con la API real el portal oculta lo que todavía no tiene tabla en la base: mensajes con la familia, objetivos terapéuticos, notas, días de la semana, varios bloques por rutina, plantillas, "cómo se sintió" y el mapa de alcance (ver `CAP` en `api.js`).
+- Con la API real el portal oculta lo que todavía no tiene tabla en la base: objetivos terapéuticos, notas, días de la semana, varios bloques por rutina, plantillas, "cómo se sintió" y el mapa de alcance (ver `CAP` en `api.js`).
 - Los íconos son MingCute (`portal/src/lib/mingcute.js`) y las fuentes se sirven desde el propio sitio (sin Google Fonts), para respetar la política de seguridad.
 
 ## Publicación en Vercel
