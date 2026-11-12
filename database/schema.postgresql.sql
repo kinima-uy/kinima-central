@@ -94,6 +94,76 @@ CREATE TABLE IF NOT EXISTS family_patient_access (
 );
 CREATE INDEX IF NOT EXISTS family_patient_access_patient ON family_patient_access(patient_id);
 
+-- Centros (multi-tenant, como Moodle): cada centro tiene su propia info, noticias y eventos,
+-- visibles solo para las familias de sus pacientes.
+CREATE TABLE IF NOT EXISTS centros (
+    id UUID PRIMARY KEY,
+    slug TEXT NOT NULL,
+    nombre TEXT NOT NULL,
+    nombre_corto TEXT NOT NULL,
+    tema TEXT NOT NULL DEFAULT 'teal' CHECK (tema IN ('teal', 'coral', 'amarillo', 'navy')),
+    logo_url TEXT,
+    ciudad TEXT,
+    bienvenida TEXT,
+    direccion TEXT,
+    horarios TEXT,
+    telefono TEXT,
+    whatsapp TEXT,
+    email_contacto TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    active BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS centros_slug_lower_unique ON centros (lower(slug));
+
+-- Cuenta del centro (ej. la persona de redes/comunicación), separada de los profesionales:
+-- solo puede administrar el contenido de SU centro (noticias, eventos, info), nunca pacientes ni rutinas.
+CREATE TABLE IF NOT EXISTS centro_admins (
+    id UUID PRIMARY KEY,
+    centro_id UUID NOT NULL REFERENCES centros(id),
+    email TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    active BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS centro_admins_email_lower_unique ON centro_admins (lower(email));
+
+CREATE TABLE IF NOT EXISTS noticias (
+    id UUID PRIMARY KEY,
+    centro_id UUID NOT NULL REFERENCES centros(id),
+    etiqueta TEXT NOT NULL DEFAULT 'Aviso' CHECK (etiqueta IN ('Aviso', 'Novedad', 'Comunidad', 'Bienvenida')),
+    titulo TEXT NOT NULL CHECK (char_length(titulo) BETWEEN 1 AND 140),
+    cuerpo TEXT NOT NULL CHECK (char_length(cuerpo) BETWEEN 1 AND 4000),
+    fijada BOOLEAN NOT NULL DEFAULT FALSE,
+    created_by UUID REFERENCES centro_admins(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS noticias_centro_created_at ON noticias(centro_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS eventos (
+    id UUID PRIMARY KEY,
+    centro_id UUID NOT NULL REFERENCES centros(id),
+    titulo TEXT NOT NULL CHECK (char_length(titulo) BETWEEN 1 AND 140),
+    lugar TEXT,
+    detalle TEXT,
+    fecha TIMESTAMPTZ NOT NULL,
+    created_by UUID REFERENCES centro_admins(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS eventos_centro_fecha ON eventos(centro_id, fecha);
+
+-- Cada paciente pertenece a un centro. Se agrega como columna nullable (no todos los pacientes
+-- existentes tienen uno todavía) y se rellena más abajo con el centro por defecto.
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS centro_id UUID REFERENCES centros(id);
+
+-- Primer arranque: si todavía no hay ningún centro, se crea uno por defecto y se le asignan
+-- los pacientes que ya existían. Es idempotente: no hace nada si ya hay al menos un centro.
+INSERT INTO centros (id, slug, nombre, nombre_corto, tema, bienvenida)
+SELECT gen_random_uuid(), 'default', 'Mi centro', 'Centro', 'teal', 'Acá vas a encontrar la rutina de cada día, los mensajes de tu terapeuta y todo lo que pasa en el centro.'
+WHERE NOT EXISTS (SELECT 1 FROM centros);
+
+UPDATE patients SET centro_id = (SELECT id FROM centros ORDER BY created_at LIMIT 1) WHERE centro_id IS NULL;
+
 -- Mensajes entre la familia y el equipo profesional, por paciente.
 CREATE TABLE IF NOT EXISTS messages (
     id UUID PRIMARY KEY,

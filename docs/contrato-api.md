@@ -34,6 +34,9 @@ Las rutas requieren token Bearer profesional y validan rol/acceso:
 | `DELETE` | `/api/v1/admin/patients/{patientId}/access` | Revoca el acceso de un profesional a un paciente (administrador). |
 | `PUT` | `/api/v1/admin/devices/{deviceId}/access` | Comparte acceso a una consola (administrador). |
 | `DELETE` | `/api/v1/admin/devices/{deviceId}/access` | Revoca el acceso de un profesional a una consola (administrador). |
+| `GET` | `/api/v1/admin/centros` | Lista los centros activos (administrador). |
+| `POST` | `/api/v1/admin/centros` | Crea un centro nuevo (administrador). |
+| `POST` | `/api/v1/admin/centro-admins` | Crea una cuenta de administración de centro (`{ centroId, email, displayName }`), devuelve `temporaryPassword` una sola vez (administrador). |
 
 Los pacientes deben usar códigos internos y etiquetas sin datos identificables directos.
 
@@ -50,6 +53,7 @@ Los pacientes deben usar códigos internos y etiquetas sin datos identificables 
 | `GET` | `/api/v1/family/patients/{patientId}/sessions?limit=50` | Progreso: sesiones recientes (fecha, duración, aciertos, si se completó). |
 | `GET`, `POST` | `/api/v1/family/patients/{patientId}/messages` | Lista o envía mensajes con el equipo profesional. |
 | `POST` | `/api/v1/family/patients/{patientId}/messages/read` | Marca como leídos los mensajes que mandó el profesional. |
+| `GET` | `/api/v1/family/patients/{patientId}/centro` | Info, noticias y próximos eventos del centro al que pertenece el paciente. |
 
 Gestión de acceso (lado profesional, requiere acceso al paciente):
 
@@ -58,6 +62,27 @@ Gestión de acceso (lado profesional, requiere acceso al paciente):
 | `GET` | `/api/v1/professional/patients/{patientId}/family` | Lista las cuentas de familia vinculadas al paciente. |
 | `PUT` | `/api/v1/professional/patients/{patientId}/family-access` | Vincula una cuenta de familia existente (`{ familyId }`) a otro paciente (hermanos). |
 | `DELETE` | `/api/v1/professional/patients/{patientId}/family-access` | Revoca el acceso de esa familia a ese paciente. |
+
+## Centros (multi-tenant)
+
+Cada paciente pertenece a un centro (`patients.centro_id`); la familia ve la info, noticias y
+eventos del centro de su hijo/a. La cuenta de centro (ej. la persona de redes/comunicación del
+centro) es independiente de los profesionales: no ve pacientes ni rutinas, solo administra el
+contenido de su propio centro.
+
+- Inicio de sesión: `POST /api/v1/centro-admin/auth/login` con `email` y `password`. Token Bearer
+  de ocho horas (mismo formato, pero no da acceso a rutas `professional/`, `admin/` ni `family/`).
+- La cuenta la crea un administrador profesional: `POST /api/v1/admin/centro-admins`.
+
+| Método | Ruta | Acción |
+|---|---|---|
+| `GET` | `/api/v1/centro-admin/me` | Lee el perfil autenticado. |
+| `GET` | `/api/v1/centro-admin/centro` | Info del centro, sus noticias y próximos eventos. |
+| `PATCH` | `/api/v1/centro-admin/centro` | Actualiza campos del centro (nombre, tema, bienvenida, contacto, etc). |
+| `POST` | `/api/v1/centro-admin/noticias` | Publica una noticia (`{ etiqueta, titulo, cuerpo, fijada }`). |
+| `DELETE` | `/api/v1/centro-admin/noticias/{noticiaId}` | Borra una noticia. |
+| `POST` | `/api/v1/centro-admin/eventos` | Crea un evento del calendario (`{ titulo, lugar, detalle, fecha }`). |
+| `DELETE` | `/api/v1/centro-admin/eventos/{eventoId}` | Borra un evento. |
 
 ## Sincronización de consola
 

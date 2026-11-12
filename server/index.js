@@ -32,7 +32,7 @@ function cors(req, res) {
   if (origin && ALLOWED_ORIGINS.has(origin)) {
     res.setHeader('access-control-allow-origin', origin);
     res.setHeader('vary', 'Origin');
-    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.setHeader('access-control-allow-methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
     res.setHeader('access-control-allow-headers', 'Content-Type, Authorization');
     res.setHeader('access-control-max-age', '600');
   }
@@ -132,6 +132,13 @@ async function canFamilyAccessPatient(familyId, patientId) {
   const found = await pool.query('SELECT 1 FROM family_patient_access WHERE family_id=$1 AND patient_id=$2', [familyId, patientId]);
   return found.rowCount > 0;
 }
+async function centroAdmin(req, res) {
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || ''); const token = match && verifyToken(match[1]);
+  if (!token) { fail(res, 401, 'unauthorized', 'Iniciá sesión para continuar.'); return null; }
+  const result = await pool.query('SELECT id,centro_id,email,display_name FROM centro_admins WHERE id=$1 AND active=TRUE', [token.sub]);
+  if (!result.rowCount) { fail(res, 401, 'unauthorized', 'La cuenta no está activa.'); return null; }
+  return result.rows[0];
+}
 async function audit(client, actorId, action, type, subjectId, details = {}, deviceId = null) {
   await client.query('INSERT INTO audit_events(id,actor_professional_id,device_id,action,subject_type,subject_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)',
     [randomUUID(), actorId, deviceId, action, type, subjectId, JSON.stringify(details)]);
@@ -192,6 +199,136 @@ async function familyLogin(input, req, res) {
   else if (!(await checkPassword(input.password, user.password_hash))) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, family: { id: user.id, email: user.email, displayName: user.display_name } });
+}
+async function listCentros(actor, res) {
+  if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede ver los centros.'); return; }
+  const result = await pool.query('SELECT id,slug,nombre,nombre_corto FROM centros WHERE active=TRUE ORDER BY nombre');
+  json(res, 200, { centros: result.rows.map((row) => ({ id: row.id, slug: row.slug, nombre: row.nombre, nombreCorto: row.nombre_corto })) });
+}
+async function createCentro(input, actor, res) {
+  if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede crear centros.'); return; }
+  const slug = typeof input.slug === 'string' ? input.slug.trim().toLowerCase() : '';
+  const nombre = typeof input.nombre === 'string' ? input.nombre.trim() : '';
+  const nombreCorto = typeof input.nombreCorto === 'string' ? input.nombreCorto.trim() : nombre.slice(0, 40);
+  if (!/^[a-z0-9-]{2,40}$/.test(slug) || nombre.length < 2 || nombre.length > 100) { fail(res, 400, 'invalid_input', 'Revisá el slug y el nombre del centro.'); return; }
+  const id = randomUUID();
+  try {
+    await pool.query('INSERT INTO centros(id,slug,nombre,nombre_corto) VALUES($1,$2,$3,$4)', [id, slug, nombre, nombreCorto || nombre.slice(0, 40)]);
+    await audit(pool, actor.id, 'centro.created', 'centro', id, { slug });
+    json(res, 201, { centro: { id, slug, nombre, nombreCorto: nombreCorto || nombre.slice(0, 40) } });
+  } catch (error) {
+    if (error.code === '23505') { fail(res, 409, 'slug_exists', 'Ya existe un centro con ese slug.'); return; }
+    throw error;
+  }
+}
+async function centroAdminLogin(input, req, res) {
+  if (limited(req, res, 'centro-admin-login', 10, 15 * 60 * 1000)) return;
+  if (!validEmail(input.email) || typeof input.password !== 'string' || input.password.length > 128) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  const result = await pool.query('SELECT id,centro_id,email,password_hash,display_name FROM centro_admins WHERE lower(email)=lower($1) AND active=TRUE', [input.email.trim()]);
+  const user = result.rows[0];
+  if (!user) await scrypt(input.password, 'kinima-constant-login-salt', 64);
+  else if (!(await checkPassword(input.password, user.password_hash))) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, centroAdmin: { id: user.id, centroId: user.centro_id, email: user.email, displayName: user.display_name } });
+}
+async function createCentroAdmin(input, actor, res) {
+  if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede crear cuentas de centro.'); return; }
+  if (!validUuid(input.centroId)) { fail(res, 400, 'invalid_input', 'Falta el centro.'); return; }
+  if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100) {
+    fail(res, 400, 'invalid_input', 'Revisá el correo y el nombre.'); return;
+  }
+  const centroExists = await pool.query('SELECT 1 FROM centros WHERE id=$1 AND active=TRUE', [input.centroId]);
+  if (!centroExists.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
+  const id = randomUUID(); const temporaryPassword = randomBytes(9).toString('base64url'); const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('INSERT INTO centro_admins(id,centro_id,email,password_hash,display_name) VALUES($1,$2,lower($3),$4,$5)',
+      [id, input.centroId, input.email.trim(), await hashPassword(temporaryPassword), input.displayName.trim()]);
+    await audit(client, actor.id, 'centro_admin.created', 'centro_admin', id, { email: input.email.trim().toLowerCase(), centroId: input.centroId });
+    await client.query('COMMIT');
+    json(res, 201, { centroAdmin: { id, centroId: input.centroId, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim() }, temporaryPassword });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta de centro con ese correo.'); return; }
+    throw error;
+  } finally { client.release(); }
+}
+async function getCentroForAdmin(actor, res) {
+  const centro = await pool.query('SELECT id,slug,nombre,nombre_corto,tema,logo_url,ciudad,bienvenida,direccion,horarios,telefono,whatsapp,email_contacto FROM centros WHERE id=$1', [actor.centro_id]);
+  if (!centro.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
+  const noticias = await pool.query('SELECT id,etiqueta,titulo,cuerpo,fijada,created_at FROM noticias WHERE centro_id=$1 ORDER BY fijada DESC, created_at DESC', [actor.centro_id]);
+  const eventos = await pool.query('SELECT id,titulo,lugar,detalle,fecha FROM eventos WHERE centro_id=$1 AND fecha > now() - interval \'1 day\' ORDER BY fecha', [actor.centro_id]);
+  json(res, 200, { centro: mapCentro(centro.rows[0]), noticias: noticias.rows.map(mapNoticia), eventos: eventos.rows.map(mapEvento) });
+}
+function mapCentro(row) {
+  return { id: row.id, slug: row.slug, nombre: row.nombre, nombreCorto: row.nombre_corto, tema: row.tema, logoUrl: row.logo_url, ciudad: row.ciudad, bienvenida: row.bienvenida, direccion: row.direccion, horarios: row.horarios, telefono: row.telefono, whatsapp: row.whatsapp, emailContacto: row.email_contacto };
+}
+function mapNoticia(row) {
+  return { id: row.id, etiqueta: row.etiqueta, titulo: row.titulo, cuerpo: row.cuerpo, fijada: row.fijada, fecha: row.created_at };
+}
+function mapEvento(row) {
+  return { id: row.id, titulo: row.titulo, lugar: row.lugar, detalle: row.detalle, fecha: row.fecha };
+}
+const CENTRO_CAMPOS = { nombre: 'nombre', nombreCorto: 'nombre_corto', tema: 'tema', logoUrl: 'logo_url', ciudad: 'ciudad', bienvenida: 'bienvenida', direccion: 'direccion', horarios: 'horarios', telefono: 'telefono', whatsapp: 'whatsapp', emailContacto: 'email_contacto' };
+const TEMAS_VALIDOS = ['teal', 'coral', 'amarillo', 'navy'];
+async function updateCentro(input, actor, res) {
+  const sets = []; const values = []; let n = 1;
+  for (const [key, column] of Object.entries(CENTRO_CAMPOS)) {
+    if (!(key in input)) continue;
+    const value = input[key];
+    if (value !== null && typeof value !== 'string') { fail(res, 400, 'invalid_input', `El campo ${key} no es válido.`); return; }
+    if (key === 'tema' && !TEMAS_VALIDOS.includes(value)) { fail(res, 400, 'invalid_input', 'El tema no es válido.'); return; }
+    if (key === 'nombre' && (!value || value.trim().length < 2 || value.trim().length > 100)) { fail(res, 400, 'invalid_input', 'El nombre no es válido.'); return; }
+    sets.push(`${column}=$${n}`); values.push(typeof value === 'string' ? value.trim() : value); n += 1;
+  }
+  if (!sets.length) { fail(res, 400, 'invalid_input', 'No hay nada para actualizar.'); return; }
+  values.push(actor.centro_id);
+  await pool.query(`UPDATE centros SET ${sets.join(',')} WHERE id=$${n}`, values);
+  json(res, 200, { ok: true });
+}
+async function createNoticia(input, actor, res) {
+  const etiqueta = ['Aviso', 'Novedad', 'Comunidad', 'Bienvenida'].includes(input.etiqueta) ? input.etiqueta : 'Aviso';
+  const titulo = typeof input.titulo === 'string' ? input.titulo.trim() : '';
+  const cuerpo = typeof input.cuerpo === 'string' ? input.cuerpo.trim() : '';
+  if (titulo.length < 1 || titulo.length > 140 || cuerpo.length < 1 || cuerpo.length > 4000) { fail(res, 400, 'invalid_input', 'Revisá el título y el texto de la noticia.'); return; }
+  const id = randomUUID();
+  const result = await pool.query('INSERT INTO noticias(id,centro_id,etiqueta,titulo,cuerpo,fijada,created_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING created_at',
+    [id, actor.centro_id, etiqueta, titulo, cuerpo, !!input.fijada, actor.id]);
+  json(res, 201, { noticia: { id, etiqueta, titulo, cuerpo, fijada: !!input.fijada, fecha: result.rows[0].created_at } });
+}
+async function deleteNoticia(actor, noticiaId, res) {
+  if (!validUuid(noticiaId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const result = await pool.query('DELETE FROM noticias WHERE id=$1 AND centro_id=$2', [noticiaId, actor.centro_id]);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró la noticia.'); return; }
+  json(res, 200, { ok: true });
+}
+async function createEvento(input, actor, res) {
+  const titulo = typeof input.titulo === 'string' ? input.titulo.trim() : '';
+  const fecha = typeof input.fecha === 'string' ? new Date(input.fecha) : null;
+  if (titulo.length < 1 || titulo.length > 140 || !fecha || Number.isNaN(fecha.getTime())) { fail(res, 400, 'invalid_input', 'Revisá el título y la fecha del evento.'); return; }
+  const lugar = typeof input.lugar === 'string' ? input.lugar.trim().slice(0, 140) : null;
+  const detalle = typeof input.detalle === 'string' ? input.detalle.trim().slice(0, 2000) : null;
+  const id = randomUUID();
+  await pool.query('INSERT INTO eventos(id,centro_id,titulo,lugar,detalle,fecha,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)',
+    [id, actor.centro_id, titulo, lugar, detalle, fecha.toISOString(), actor.id]);
+  json(res, 201, { evento: { id, titulo, lugar, detalle, fecha: fecha.toISOString() } });
+}
+async function deleteEvento(actor, eventoId, res) {
+  if (!validUuid(eventoId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const result = await pool.query('DELETE FROM eventos WHERE id=$1 AND centro_id=$2', [eventoId, actor.centro_id]);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró el evento.'); return; }
+  json(res, 200, { ok: true });
+}
+async function getFamilyCentro(actor, patientId, res) {
+  if (!validUuid(patientId) || !(await canFamilyAccessPatient(actor.id, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
+  const patient = await pool.query('SELECT centro_id FROM patients WHERE id=$1', [patientId]);
+  const centroId = patient.rows[0]?.centro_id;
+  if (!centroId) { fail(res, 404, 'not_found', 'Este paciente todavía no tiene un centro asignado.'); return; }
+  const centro = await pool.query('SELECT id,slug,nombre,nombre_corto,tema,logo_url,ciudad,bienvenida,direccion,horarios,telefono,whatsapp,email_contacto FROM centros WHERE id=$1 AND active=TRUE', [centroId]);
+  if (!centro.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
+  const noticias = await pool.query('SELECT id,etiqueta,titulo,cuerpo,fijada,created_at FROM noticias WHERE centro_id=$1 ORDER BY fijada DESC, created_at DESC LIMIT 30', [centroId]);
+  const eventos = await pool.query('SELECT id,titulo,lugar,detalle,fecha FROM eventos WHERE centro_id=$1 AND fecha > now() - interval \'1 day\' ORDER BY fecha LIMIT 20', [centroId]);
+  json(res, 200, { centro: mapCentro(centro.rows[0]), noticias: noticias.rows.map(mapNoticia), eventos: eventos.rows.map(mapEvento) });
 }
 async function createFamily(input, actor, res) {
   if (!validUuid(input.patientId) || !(await canAccessPatient(actor, input.patientId))) { fail(res, 403, 'forbidden', 'No tenés acceso a ese paciente.'); return; }
@@ -271,9 +408,10 @@ async function markPatientMessagesRead(patientId, readerType, res) {
   json(res, 200, { ok: true });
 }
 async function listFamilyPatients(actor, res) {
-  const result = await pool.query(`SELECT p.id,p.local_code,p.display_label FROM family_patient_access a
-    JOIN patients p ON p.id=a.patient_id AND p.active=TRUE WHERE a.family_id=$1 ORDER BY p.local_code`, [actor.id]);
-  json(res, 200, { patients: result.rows.map((row) => ({ id: row.id, localCode: row.local_code, displayLabel: row.display_label })) });
+  const result = await pool.query(`SELECT p.id,p.local_code,p.display_label,
+    (SELECT COUNT(*)::integer FROM messages m WHERE m.patient_id=p.id AND m.sender_type='profesional' AND m.read_at IS NULL) AS sin_leer
+    FROM family_patient_access a JOIN patients p ON p.id=a.patient_id AND p.active=TRUE WHERE a.family_id=$1 ORDER BY p.local_code`, [actor.id]);
+  json(res, 200, { patients: result.rows.map((row) => ({ id: row.id, localCode: row.local_code, displayLabel: row.display_label, sinLeer: row.sin_leer })) });
 }
 async function familyPatientAssignment(actor, patientId, res) {
   if (!validUuid(patientId) || !(await canFamilyAccessPatient(actor.id, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
@@ -314,7 +452,8 @@ async function createPatient(input, actor, res) {
   const id = randomUUID(); const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('INSERT INTO patients(id,local_code,display_label,created_by) VALUES($1,$2,$3,$4)', [id, localCode, displayLabel, actor.id]);
+    const centro = await client.query('SELECT id FROM centros WHERE active=TRUE ORDER BY created_at LIMIT 1');
+    await client.query('INSERT INTO patients(id,local_code,display_label,created_by,centro_id) VALUES($1,$2,$3,$4,$5)', [id, localCode, displayLabel, actor.id, centro.rows[0]?.id || null]);
     if (actor.role === 'professional') await client.query('INSERT INTO professional_patient_access(professional_id,patient_id) VALUES($1,$2)', [actor.id, id]);
     await audit(client, actor.id, 'patient.created', 'patient', id, { localCode });
     await client.query('COMMIT');
@@ -617,6 +756,22 @@ async function route(req, res) {
       if (!validUuid(patientId) || !(await canFamilyAccessPatient(actor.id, patientId))) { fail(res, 404, 'not_found', 'No se encontró el paciente.'); return; }
       await markPatientMessagesRead(patientId, 'familia', res); return;
     }
+    if (req.method === 'GET' && /^patients\/[0-9a-f-]+\/centro$/.test(suffix)) { await getFamilyCentro(actor, suffix.split('/')[1], res); return; }
+    fail(res, 404, 'not_found', 'No se encontró esta ruta.'); return;
+  }
+
+  if (req.method === 'POST' && path === '/api/v1/centro-admin/auth/login') { await centroAdminLogin(await body(req), req, res); return; }
+
+  if (path.startsWith('/api/v1/centro-admin/')) {
+    const actor = await centroAdmin(req, res); if (!actor) return;
+    const suffix = path.slice('/api/v1/centro-admin/'.length);
+    if (req.method === 'GET' && suffix === 'me') { json(res, 200, { centroAdmin: { id: actor.id, centroId: actor.centro_id, email: actor.email, displayName: actor.display_name } }); return; }
+    if (req.method === 'GET' && suffix === 'centro') { await getCentroForAdmin(actor, res); return; }
+    if (req.method === 'PATCH' && suffix === 'centro') { await updateCentro(await body(req), actor, res); return; }
+    if (req.method === 'POST' && suffix === 'noticias') { await createNoticia(await body(req), actor, res); return; }
+    if (req.method === 'DELETE' && /^noticias\/[0-9a-f-]+$/.test(suffix)) { await deleteNoticia(actor, suffix.split('/')[1], res); return; }
+    if (req.method === 'POST' && suffix === 'eventos') { await createEvento(await body(req), actor, res); return; }
+    if (req.method === 'DELETE' && /^eventos\/[0-9a-f-]+$/.test(suffix)) { await deleteEvento(actor, suffix.split('/')[1], res); return; }
     fail(res, 404, 'not_found', 'No se encontró esta ruta.'); return;
   }
 
@@ -674,6 +829,9 @@ async function route(req, res) {
     }
     if (req.method === 'GET' && suffix === 'admin/professionals') { await listProfessionals(actor, res); return; }
     if (req.method === 'GET' && suffix === 'admin/access') { await listAccess(actor, res); return; }
+    if (req.method === 'GET' && suffix === 'admin/centros') { await listCentros(actor, res); return; }
+    if (req.method === 'POST' && suffix === 'admin/centros') { await createCentro(await body(req), actor, res); return; }
+    if (req.method === 'POST' && suffix === 'admin/centro-admins') { await createCentroAdmin(await body(req), actor, res); return; }
     const adminPatientAccess = suffix.split('/');
     if (adminPatientAccess.length === 4 && adminPatientAccess[0] === 'admin' && adminPatientAccess[1] === 'patients' && validUuid(adminPatientAccess[2]) && adminPatientAccess[3] === 'access') {
       if (req.method === 'PUT') { await grantPatientAccess(await body(req), actor, adminPatientAccess[2], res); return; }
