@@ -111,7 +111,7 @@ function limited(req, res, name, max, durationMs) {
 async function professional(req, res) {
   const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || ''); const token = match && verifyToken(match[1]);
   if (!token) { fail(res, 401, 'unauthorized', 'Iniciá sesión para continuar.'); return null; }
-  const result = await pool.query('SELECT id,email,display_name,role FROM professionals WHERE id=$1 AND active=TRUE', [token.sub]);
+  const result = await pool.query('SELECT id,email,display_name,role,centro_id FROM professionals WHERE id=$1 AND active=TRUE', [token.sub]);
   if (!result.rowCount) { fail(res, 401, 'unauthorized', 'La cuenta no está activa.'); return null; }
   return result.rows[0];
 }
@@ -163,12 +163,18 @@ async function audit(client, actorId, action, type, subjectId, details = {}, dev
     [randomUUID(), actorId, deviceId, action, type, subjectId, JSON.stringify(details)]);
 }
 async function canAccessPatient(actor, id) {
-  if (actor.role === 'administrator') return true;
+  if (actor.role === 'administrator') {
+    const found = await pool.query('SELECT 1 FROM patients WHERE id=$1 AND centro_id=$2', [id, actor.centro_id]);
+    return found.rowCount > 0;
+  }
   const found = await pool.query('SELECT 1 FROM professional_patient_access WHERE professional_id=$1 AND patient_id=$2', [actor.id, id]);
   return found.rowCount > 0;
 }
 async function canAccessDevice(actor, id) {
-  if (actor.role === 'administrator') return true;
+  if (actor.role === 'administrator') {
+    const found = await pool.query('SELECT 1 FROM devices WHERE id=$1 AND centro_id=$2', [id, actor.centro_id]);
+    return found.rowCount > 0;
+  }
   const found = await pool.query('SELECT 1 FROM professional_device_access WHERE professional_id=$1 AND device_id=$2', [actor.id, id]);
   return found.rowCount > 0;
 }
@@ -543,6 +549,7 @@ async function familyPatientSessions(actor, patientId, url, res) {
 }
 async function createProfessional(input, actor, res) {
   if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede crear usuarios.'); return; }
+  if (!actor.centro_id) { fail(res, 409, 'no_centro', 'Tu cuenta no tiene un centro asignado. Contactá a Kinima.'); return; }
   const role = input.role || 'professional';
   if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100 || typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128 || !['professional','administrator'].includes(role)) {
     fail(res, 400, 'invalid_input', 'Revisá los datos; la contraseña debe tener al menos 12 caracteres.'); return;
@@ -550,8 +557,8 @@ async function createProfessional(input, actor, res) {
   const id = randomUUID(); const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('INSERT INTO professionals(id,email,password_hash,display_name,role) VALUES($1,lower($2),$3,$4,$5)',
-      [id, input.email.trim(), await hashPassword(input.password), input.displayName.trim(), role]);
+    await client.query('INSERT INTO professionals(id,email,password_hash,display_name,role,centro_id) VALUES($1,lower($2),$3,$4,$5,$6)',
+      [id, input.email.trim(), await hashPassword(input.password), input.displayName.trim(), role, actor.centro_id]);
     await audit(client, actor.id, 'professional.created', 'professional', id, { email: input.email.trim().toLowerCase(), role });
     await client.query('COMMIT');
     json(res, 201, { professional: { id, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim(), role } });
@@ -568,8 +575,7 @@ async function createPatient(input, actor, res) {
   const id = randomUUID(); const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const centro = await client.query('SELECT id FROM centros WHERE active=TRUE ORDER BY created_at LIMIT 1');
-    await client.query('INSERT INTO patients(id,local_code,display_label,created_by,centro_id) VALUES($1,$2,$3,$4,$5)', [id, localCode, displayLabel, actor.id, centro.rows[0]?.id || null]);
+    await client.query('INSERT INTO patients(id,local_code,display_label,created_by,centro_id) VALUES($1,$2,$3,$4,$5)', [id, localCode, displayLabel, actor.id, actor.centro_id || null]);
     if (actor.role === 'professional') await client.query('INSERT INTO professional_patient_access(professional_id,patient_id) VALUES($1,$2)', [actor.id, id]);
     await audit(client, actor.id, 'patient.created', 'patient', id, { localCode });
     await client.query('COMMIT');
@@ -588,7 +594,7 @@ async function createDevice(input, actor, res) {
   const id = randomUUID(); const deviceToken = randomBytes(32).toString('base64url'); const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query('INSERT INTO devices(id,device_code,display_name,credential_hash) VALUES($1,$2,$3,$4)', [id, deviceCode, displayName, hashToken(deviceToken)]);
+    await client.query('INSERT INTO devices(id,device_code,display_name,credential_hash,centro_id) VALUES($1,$2,$3,$4,$5)', [id, deviceCode, displayName, hashToken(deviceToken), actor.centro_id || null]);
     await audit(client, actor.id, 'device.created', 'device', id, { deviceCode }, id);
     await client.query('COMMIT');
     json(res, 201, { device: { id, deviceCode, displayName }, deviceToken });
@@ -618,13 +624,13 @@ async function grantDeviceAccess(input, actor, deviceId, res) {
   if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede compartir consolas.'); return; }
   if (!validUuid(deviceId) || !validUuid(input.professionalId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
   const result = await pool.query(`INSERT INTO professional_device_access(professional_id,device_id)
-    SELECT p.id,d.id FROM professionals p,devices d WHERE p.id=$1 AND p.active=TRUE AND p.role='professional' AND d.id=$2 AND d.active=TRUE
-    ON CONFLICT DO NOTHING RETURNING professional_id`, [input.professionalId, deviceId]);
+    SELECT p.id,d.id FROM professionals p,devices d WHERE p.id=$1 AND p.active=TRUE AND p.role='professional' AND p.centro_id=$3 AND d.id=$2 AND d.active=TRUE AND d.centro_id=$3
+    ON CONFLICT DO NOTHING RETURNING professional_id`, [input.professionalId, deviceId, actor.centro_id]);
   if (!result.rowCount) {
     const existing = await pool.query(`SELECT 1 FROM professional_device_access a
-      JOIN professionals p ON p.id=a.professional_id AND p.active=TRUE AND p.role='professional'
-      JOIN devices d ON d.id=a.device_id AND d.active=TRUE
-      WHERE a.professional_id=$1 AND a.device_id=$2`, [input.professionalId, deviceId]);
+      JOIN professionals p ON p.id=a.professional_id AND p.active=TRUE AND p.role='professional' AND p.centro_id=$3
+      JOIN devices d ON d.id=a.device_id AND d.active=TRUE AND d.centro_id=$3
+      WHERE a.professional_id=$1 AND a.device_id=$2`, [input.professionalId, deviceId, actor.centro_id]);
     if (!existing.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta o la consola.'); return; }
     json(res, 200, { granted: true });
     return;
@@ -638,14 +644,14 @@ async function listAccess(actor, res) {
   const [patients, devices] = await Promise.all([
     pool.query(`SELECT a.professional_id,p.display_name,p.email,pt.id AS patient_id,pt.local_code,pt.display_label
       FROM professional_patient_access a
-      JOIN professionals p ON p.id=a.professional_id AND p.active=TRUE AND p.role='professional'
+      JOIN professionals p ON p.id=a.professional_id AND p.active=TRUE AND p.role='professional' AND p.centro_id=$1
       JOIN patients pt ON pt.id=a.patient_id AND pt.active=TRUE
-      ORDER BY pt.local_code,p.display_name`),
+      ORDER BY pt.local_code,p.display_name`, [actor.centro_id]),
     pool.query(`SELECT a.professional_id,p.display_name,p.email,d.id AS device_id,d.device_code,d.display_name AS device_name
       FROM professional_device_access a
-      JOIN professionals p ON p.id=a.professional_id AND p.active=TRUE AND p.role='professional'
+      JOIN professionals p ON p.id=a.professional_id AND p.active=TRUE AND p.role='professional' AND p.centro_id=$1
       JOIN devices d ON d.id=a.device_id AND d.active=TRUE
-      ORDER BY d.device_code,p.display_name`)
+      ORDER BY d.device_code,p.display_name`, [actor.centro_id])
   ]);
   json(res, 200, {
     patientAccess: patients.rows.map((row) => ({
@@ -661,6 +667,8 @@ async function listAccess(actor, res) {
 async function revokePatientAccess(input, actor, patientId, res) {
   if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede revocar permisos.'); return; }
   if (!validUuid(patientId) || !validUuid(input.professionalId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const scopedPatient = await pool.query('SELECT 1 FROM professionals WHERE id=$1 AND centro_id=$2', [input.professionalId, actor.centro_id]);
+  if (!scopedPatient.rowCount) { fail(res, 404, 'not_found', 'No se encontró ese acceso al paciente.'); return; }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -676,6 +684,8 @@ async function revokePatientAccess(input, actor, patientId, res) {
 async function revokeDeviceAccess(input, actor, deviceId, res) {
   if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede revocar permisos.'); return; }
   if (!validUuid(deviceId) || !validUuid(input.professionalId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const scopedDevice = await pool.query('SELECT 1 FROM professionals WHERE id=$1 AND centro_id=$2', [input.professionalId, actor.centro_id]);
+  if (!scopedDevice.rowCount) { fail(res, 404, 'not_found', 'No se encontró ese acceso a la consola.'); return; }
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -692,7 +702,7 @@ async function listPatients(actor, res) {
   const result = actor.role === 'administrator'
     ? await pool.query(`SELECT p.id,p.local_code,p.display_label,p.created_at,
          (SELECT COUNT(*)::integer FROM messages m WHERE m.patient_id=p.id AND m.sender_type='familia' AND m.read_at IS NULL) AS sin_leer
-       FROM patients p WHERE p.active=TRUE ORDER BY p.local_code`)
+       FROM patients p WHERE p.active=TRUE AND p.centro_id=$1 ORDER BY p.local_code`, [actor.centro_id])
     : await pool.query(`SELECT p.id,p.local_code,p.display_label,p.created_at,
          (SELECT COUNT(*)::integer FROM messages m WHERE m.patient_id=p.id AND m.sender_type='familia' AND m.read_at IS NULL) AS sin_leer
        FROM patients p JOIN professional_patient_access a ON a.patient_id=p.id
@@ -703,12 +713,12 @@ async function listDevices(actor, res) {
   const query = actor.role === 'administrator'
     ? `SELECT d.id,d.device_code,d.display_name,d.last_seen_at,a.patient_id,a.version,a.exercise_config,p.local_code,p.display_label
        FROM devices d LEFT JOIN assignments a ON a.device_id=d.id AND a.status='active'
-       LEFT JOIN patients p ON p.id=a.patient_id WHERE d.active=TRUE ORDER BY d.device_code`
+       LEFT JOIN patients p ON p.id=a.patient_id WHERE d.active=TRUE AND d.centro_id=$1 ORDER BY d.device_code`
     : `SELECT d.id,d.device_code,d.display_name,d.last_seen_at,a.patient_id,a.version,a.exercise_config,p.local_code,p.display_label
        FROM devices d JOIN professional_device_access da ON da.device_id=d.id
        LEFT JOIN assignments a ON a.device_id=d.id AND a.status='active'
        LEFT JOIN patients p ON p.id=a.patient_id WHERE da.professional_id=$1 AND d.active=TRUE ORDER BY d.device_code`;
-  const result = actor.role === 'administrator' ? await pool.query(query) : await pool.query(query, [actor.id]);
+  const result = actor.role === 'administrator' ? await pool.query(query, [actor.centro_id]) : await pool.query(query, [actor.id]);
   json(res, 200, { devices: result.rows.map((row) => ({
     id: row.id, deviceCode: row.device_code, displayName: row.display_name, lastSeenAt: row.last_seen_at,
     activeAssignment: row.patient_id ? { patientId: row.patient_id, patientCode: row.local_code, patientLabel: row.display_label, version: Number(row.version), exercise: row.exercise_config } : null
@@ -1017,20 +1027,20 @@ export { app, pool, HOST, PORT };
 export default app;
 async function listProfessionals(actor, res) {
   if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede gestionar permisos.'); return; }
-  const result = await pool.query('SELECT id,email,display_name,role FROM professionals WHERE active=TRUE ORDER BY display_name');
+  const result = await pool.query('SELECT id,email,display_name,role FROM professionals WHERE active=TRUE AND centro_id=$1 ORDER BY display_name', [actor.centro_id]);
   json(res, 200, { professionals: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, role: row.role })) });
 }
 async function grantPatientAccess(input, actor, patientId, res) {
   if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede compartir pacientes.'); return; }
   if (!validUuid(patientId) || !validUuid(input.professionalId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
   const result = await pool.query(`INSERT INTO professional_patient_access(professional_id,patient_id)
-    SELECT p.id,pt.id FROM professionals p,patients pt WHERE p.id=$1 AND p.active=TRUE AND p.role='professional' AND pt.id=$2 AND pt.active=TRUE
-    ON CONFLICT DO NOTHING RETURNING patient_id`, [input.professionalId, patientId]);
+    SELECT p.id,pt.id FROM professionals p,patients pt WHERE p.id=$1 AND p.active=TRUE AND p.role='professional' AND p.centro_id=$3 AND pt.id=$2 AND pt.active=TRUE AND pt.centro_id=$3
+    ON CONFLICT DO NOTHING RETURNING patient_id`, [input.professionalId, patientId, actor.centro_id]);
   if (!result.rowCount) {
     const existing = await pool.query(`SELECT 1 FROM professional_patient_access a
-      JOIN professionals p ON p.id=a.professional_id AND p.active=TRUE AND p.role='professional'
-      JOIN patients pt ON pt.id=a.patient_id AND pt.active=TRUE
-      WHERE a.professional_id=$1 AND a.patient_id=$2`, [input.professionalId, patientId]);
+      JOIN professionals p ON p.id=a.professional_id AND p.active=TRUE AND p.role='professional' AND p.centro_id=$3
+      JOIN patients pt ON pt.id=a.patient_id AND pt.active=TRUE AND pt.centro_id=$3
+      WHERE a.professional_id=$1 AND a.patient_id=$2`, [input.professionalId, patientId, actor.centro_id]);
     if (!existing.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta o el paciente.'); return; }
     json(res, 200, { granted: true });
     return;

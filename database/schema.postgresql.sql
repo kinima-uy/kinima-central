@@ -193,6 +193,12 @@ UPDATE patients SET centro_id = (SELECT id FROM centros ORDER BY created_at LIMI
 -- Cada profesional (terapeuta) pertenece a un centro, igual que los pacientes. Nullable por los
 -- mismos motivos: cuentas existentes de antes de este cambio no tienen uno todavía.
 ALTER TABLE professionals ADD COLUMN IF NOT EXISTS centro_id UUID REFERENCES centros(id);
+UPDATE professionals SET centro_id = (SELECT id FROM centros ORDER BY created_at LIMIT 1) WHERE centro_id IS NULL;
+
+-- Cada consola (Raspberry Pi) también pertenece a un centro, para que un administrador de centro
+-- solo vea y gestione las consolas de su propio centro.
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS centro_id UUID REFERENCES centros(id);
+UPDATE devices SET centro_id = (SELECT id FROM centros ORDER BY created_at LIMIT 1) WHERE centro_id IS NULL;
 
 -- Mensajes entre la familia y el equipo profesional, por paciente.
 CREATE TABLE IF NOT EXISTS messages (
