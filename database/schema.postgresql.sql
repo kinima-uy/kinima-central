@@ -11,6 +11,32 @@ CREATE TABLE IF NOT EXISTS professionals (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS professionals_email_lower_unique ON professionals (lower(email));
 
+-- Dueñas de Kinima (no profesionales, no centro_admins): control total sobre todos los centros
+-- clientes, sus cuentas de centro_admin y sus profesionales. Tabla separada a propósito, para que
+-- un admin de un centro cliente nunca tenga este nivel de acceso.
+CREATE TABLE IF NOT EXISTS kinima_owners (
+    id UUID PRIMARY KEY,
+    email TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    active BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS kinima_owners_email_lower_unique ON kinima_owners (lower(email));
+
+-- Contacto interno de referencia en cada centro cliente (para uso de las dueñas de Kinima,
+-- no se muestra a las familias; distinto del contacto público que sí ven en centros.email_contacto).
+CREATE TABLE IF NOT EXISTS centro_contactos (
+    id UUID PRIMARY KEY,
+    centro_id UUID NOT NULL REFERENCES centros(id),
+    nombre TEXT NOT NULL CHECK (char_length(nombre) BETWEEN 1 AND 100),
+    cargo TEXT,
+    telefono TEXT,
+    email TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS centro_contactos_centro ON centro_contactos(centro_id);
+
 CREATE TABLE IF NOT EXISTS patients (
     id UUID PRIMARY KEY,
     local_code TEXT NOT NULL UNIQUE,
@@ -163,6 +189,10 @@ SELECT gen_random_uuid(), 'default', 'Mi centro', 'Centro', 'teal', 'Acá vas a 
 WHERE NOT EXISTS (SELECT 1 FROM centros);
 
 UPDATE patients SET centro_id = (SELECT id FROM centros ORDER BY created_at LIMIT 1) WHERE centro_id IS NULL;
+
+-- Cada profesional (terapeuta) pertenece a un centro, igual que los pacientes. Nullable por los
+-- mismos motivos: cuentas existentes de antes de este cambio no tienen uno todavía.
+ALTER TABLE professionals ADD COLUMN IF NOT EXISTS centro_id UUID REFERENCES centros(id);
 
 -- Mensajes entre la familia y el equipo profesional, por paciente.
 CREATE TABLE IF NOT EXISTS messages (

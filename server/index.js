@@ -24,6 +24,7 @@ if (JWT_SECRET.length < 32) throw new Error('JWT_SECRET debe tener al menos 32 c
 const ALLOWED_ORIGINS = new Set([
   'https://portal.kinima.uy',
   'https://familias.kinima.uy',
+  'https://hq.kinima.uy',
   'http://localhost:5173',
   'http://localhost:4173',
 ]);
@@ -139,6 +140,13 @@ async function centroAdmin(req, res) {
   if (!result.rowCount) { fail(res, 401, 'unauthorized', 'La cuenta no está activa.'); return null; }
   return result.rows[0];
 }
+async function owner(req, res) {
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || ''); const token = match && verifyToken(match[1]);
+  if (!token) { fail(res, 401, 'unauthorized', 'Iniciá sesión para continuar.'); return null; }
+  const result = await pool.query('SELECT id,email,display_name FROM kinima_owners WHERE id=$1 AND active=TRUE', [token.sub]);
+  if (!result.rowCount) { fail(res, 401, 'unauthorized', 'La cuenta no está activa.'); return null; }
+  return result.rows[0];
+}
 async function audit(client, actorId, action, type, subjectId, details = {}, deviceId = null) {
   await client.query('INSERT INTO audit_events(id,actor_professional_id,device_id,action,subject_type,subject_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)',
     [randomUUID(), actorId, deviceId, action, type, subjectId, JSON.stringify(details)]);
@@ -180,6 +188,31 @@ async function bootstrapAdmin(input, res) {
     throw error;
   } finally { client.release(); }
 }
+async function bootstrapOwner(input, res) {
+  if (!BOOTSTRAP_TOKEN || !equal(input.bootstrapToken || '', BOOTSTRAP_TOKEN)) { fail(res, 403, 'bootstrap_denied', 'El código inicial no es válido.'); return; }
+  if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100 || typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) {
+    fail(res, 400, 'invalid_input', 'Revisá el correo y el nombre. La contraseña debe tener al menos 12 caracteres.'); return;
+  }
+  const id = randomUUID();
+  try {
+    await pool.query('INSERT INTO kinima_owners(id,email,password_hash,display_name) VALUES($1,lower($2),$3,$4)',
+      [id, input.email.trim(), await hashPassword(input.password), input.displayName.trim()]);
+    json(res, 201, { accessToken: signToken(id), expiresIn: TOKEN_TTL, owner: { id, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim() } });
+  } catch (error) {
+    if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta de dueña con ese correo.'); return; }
+    throw error;
+  }
+}
+async function ownerLogin(input, req, res) {
+  if (limited(req, res, 'owner-login', 10, 15 * 60 * 1000)) return;
+  if (!validEmail(input.email) || typeof input.password !== 'string' || input.password.length > 128) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  const result = await pool.query('SELECT id,email,password_hash,display_name FROM kinima_owners WHERE lower(email)=lower($1) AND active=TRUE', [input.email.trim()]);
+  const user = result.rows[0];
+  if (!user) await scrypt(input.password, 'kinima-constant-login-salt', 64);
+  else if (!(await checkPassword(input.password, user.password_hash))) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
+  json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, owner: { id: user.id, email: user.email, displayName: user.display_name } });
+}
 async function login(input, req, res) {
   if (limited(req, res, 'login', 10, 15 * 60 * 1000)) return;
   if (!validEmail(input.email) || typeof input.password !== 'string' || input.password.length > 128) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
@@ -200,13 +233,11 @@ async function familyLogin(input, req, res) {
   if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, family: { id: user.id, email: user.email, displayName: user.display_name } });
 }
-async function listCentros(actor, res) {
-  if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede ver los centros.'); return; }
-  const result = await pool.query('SELECT id,slug,nombre,nombre_corto FROM centros WHERE active=TRUE ORDER BY nombre');
-  json(res, 200, { centros: result.rows.map((row) => ({ id: row.id, slug: row.slug, nombre: row.nombre, nombreCorto: row.nombre_corto })) });
+async function listCentros(res) {
+  const result = await pool.query('SELECT id,slug,nombre,nombre_corto,tema,ciudad,active FROM centros ORDER BY active DESC, nombre');
+  json(res, 200, { centros: result.rows.map((row) => ({ id: row.id, slug: row.slug, nombre: row.nombre, nombreCorto: row.nombre_corto, tema: row.tema, ciudad: row.ciudad, active: row.active })) });
 }
-async function createCentro(input, actor, res) {
-  if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede crear centros.'); return; }
+async function createCentro(input, res) {
   const slug = typeof input.slug === 'string' ? input.slug.trim().toLowerCase() : '';
   const nombre = typeof input.nombre === 'string' ? input.nombre.trim() : '';
   const nombreCorto = typeof input.nombreCorto === 'string' ? input.nombreCorto.trim() : nombre.slice(0, 40);
@@ -214,10 +245,89 @@ async function createCentro(input, actor, res) {
   const id = randomUUID();
   try {
     await pool.query('INSERT INTO centros(id,slug,nombre,nombre_corto) VALUES($1,$2,$3,$4)', [id, slug, nombre, nombreCorto || nombre.slice(0, 40)]);
-    await audit(pool, actor.id, 'centro.created', 'centro', id, { slug });
-    json(res, 201, { centro: { id, slug, nombre, nombreCorto: nombreCorto || nombre.slice(0, 40) } });
+    json(res, 201, { centro: { id, slug, nombre, nombreCorto: nombreCorto || nombre.slice(0, 40), active: true } });
   } catch (error) {
     if (error.code === '23505') { fail(res, 409, 'slug_exists', 'Ya existe un centro con ese slug.'); return; }
+    throw error;
+  }
+}
+async function ownerUpdateCentro(input, centroId, res) {
+  if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const sets = []; const values = []; let n = 1;
+  for (const [key, column] of Object.entries(CENTRO_CAMPOS)) {
+    if (!(key in input)) continue;
+    const value = input[key];
+    if (value !== null && typeof value !== 'string') { fail(res, 400, 'invalid_input', `El campo ${key} no es válido.`); return; }
+    if (key === 'tema' && !TEMAS_VALIDOS.includes(value)) { fail(res, 400, 'invalid_input', 'El tema no es válido.'); return; }
+    if (key === 'nombre' && (!value || value.trim().length < 2 || value.trim().length > 100)) { fail(res, 400, 'invalid_input', 'El nombre no es válido.'); return; }
+    sets.push(`${column}=$${n}`); values.push(typeof value === 'string' ? value.trim() : value); n += 1;
+  }
+  if ('active' in input) {
+    if (typeof input.active !== 'boolean') { fail(res, 400, 'invalid_input', 'El campo active no es válido.'); return; }
+    sets.push(`active=$${n}`); values.push(input.active); n += 1;
+  }
+  if (!sets.length) { fail(res, 400, 'invalid_input', 'No hay nada para actualizar.'); return; }
+  values.push(centroId);
+  const result = await pool.query(`UPDATE centros SET ${sets.join(',')} WHERE id=$${n} RETURNING id`, values);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
+  json(res, 200, { ok: true });
+}
+async function listContactos(centroId, res) {
+  if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const result = await pool.query('SELECT id,nombre,cargo,telefono,email FROM centro_contactos WHERE centro_id=$1 ORDER BY nombre', [centroId]);
+  json(res, 200, { contactos: result.rows.map((row) => ({ id: row.id, nombre: row.nombre, cargo: row.cargo, telefono: row.telefono, email: row.email })) });
+}
+async function createContacto(input, centroId, res) {
+  if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const nombre = typeof input.nombre === 'string' ? input.nombre.trim() : '';
+  if (nombre.length < 1 || nombre.length > 100) { fail(res, 400, 'invalid_input', 'Ingresá un nombre.'); return; }
+  const cargo = typeof input.cargo === 'string' ? input.cargo.trim().slice(0, 100) : null;
+  const telefono = typeof input.telefono === 'string' ? input.telefono.trim().slice(0, 40) : null;
+  const email = typeof input.email === 'string' && validEmail(input.email) ? input.email.trim().toLowerCase() : null;
+  const centroExists = await pool.query('SELECT 1 FROM centros WHERE id=$1', [centroId]);
+  if (!centroExists.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
+  const id = randomUUID();
+  await pool.query('INSERT INTO centro_contactos(id,centro_id,nombre,cargo,telefono,email) VALUES($1,$2,$3,$4,$5,$6)', [id, centroId, nombre, cargo, telefono, email]);
+  json(res, 201, { contacto: { id, nombre, cargo, telefono, email } });
+}
+async function deleteContacto(centroId, contactoId, res) {
+  if (!validUuid(centroId) || !validUuid(contactoId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const result = await pool.query('DELETE FROM centro_contactos WHERE id=$1 AND centro_id=$2', [contactoId, centroId]);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró el contacto.'); return; }
+  json(res, 200, { ok: true });
+}
+async function listCentroAdminsByCentro(centroId, res) {
+  if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const result = await pool.query('SELECT id,email,display_name FROM centro_admins WHERE centro_id=$1 AND active=TRUE ORDER BY display_name', [centroId]);
+  json(res, 200, { centroAdmins: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name })) });
+}
+async function resetCentroAdminPassword(centroAdminId, res) {
+  if (!validUuid(centroAdminId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const temporaryPassword = randomBytes(9).toString('base64url');
+  const result = await pool.query('UPDATE centro_admins SET password_hash=$1 WHERE id=$2 AND active=TRUE RETURNING id', [await hashPassword(temporaryPassword), centroAdminId]);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta.'); return; }
+  json(res, 200, { temporaryPassword });
+}
+async function listProfessionalsByCentro(centroId, res) {
+  if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const result = await pool.query('SELECT id,email,display_name,role FROM professionals WHERE centro_id=$1 AND active=TRUE ORDER BY display_name', [centroId]);
+  json(res, 200, { professionals: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, role: row.role })) });
+}
+async function createProfessionalForCentro(input, centroId, res) {
+  if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const role = ['professional', 'administrator'].includes(input.role) ? input.role : 'professional';
+  if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100) {
+    fail(res, 400, 'invalid_input', 'Revisá el correo y el nombre.'); return;
+  }
+  const centroExists = await pool.query('SELECT 1 FROM centros WHERE id=$1', [centroId]);
+  if (!centroExists.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
+  const id = randomUUID(); const temporaryPassword = randomBytes(9).toString('base64url');
+  try {
+    await pool.query('INSERT INTO professionals(id,email,password_hash,display_name,role,centro_id) VALUES($1,lower($2),$3,$4,$5,$6)',
+      [id, input.email.trim(), await hashPassword(temporaryPassword), input.displayName.trim(), role, centroId]);
+    json(res, 201, { professional: { id, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim(), role, centroId }, temporaryPassword });
+  } catch (error) {
+    if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta con ese correo.'); return; }
     throw error;
   }
 }
@@ -231,27 +341,22 @@ async function centroAdminLogin(input, req, res) {
   if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, centroAdmin: { id: user.id, centroId: user.centro_id, email: user.email, displayName: user.display_name } });
 }
-async function createCentroAdmin(input, actor, res) {
-  if (actor.role !== 'administrator') { fail(res, 403, 'forbidden', 'Solo una cuenta administradora puede crear cuentas de centro.'); return; }
+async function createCentroAdmin(input, res) {
   if (!validUuid(input.centroId)) { fail(res, 400, 'invalid_input', 'Falta el centro.'); return; }
   if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100) {
     fail(res, 400, 'invalid_input', 'Revisá el correo y el nombre.'); return;
   }
   const centroExists = await pool.query('SELECT 1 FROM centros WHERE id=$1 AND active=TRUE', [input.centroId]);
   if (!centroExists.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
-  const id = randomUUID(); const temporaryPassword = randomBytes(9).toString('base64url'); const client = await pool.connect();
+  const id = randomUUID(); const temporaryPassword = randomBytes(9).toString('base64url');
   try {
-    await client.query('BEGIN');
-    await client.query('INSERT INTO centro_admins(id,centro_id,email,password_hash,display_name) VALUES($1,$2,lower($3),$4,$5)',
+    await pool.query('INSERT INTO centro_admins(id,centro_id,email,password_hash,display_name) VALUES($1,$2,lower($3),$4,$5)',
       [id, input.centroId, input.email.trim(), await hashPassword(temporaryPassword), input.displayName.trim()]);
-    await audit(client, actor.id, 'centro_admin.created', 'centro_admin', id, { email: input.email.trim().toLowerCase(), centroId: input.centroId });
-    await client.query('COMMIT');
     json(res, 201, { centroAdmin: { id, centroId: input.centroId, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim() }, temporaryPassword });
   } catch (error) {
-    await client.query('ROLLBACK');
     if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta de centro con ese correo.'); return; }
     throw error;
-  } finally { client.release(); }
+  }
 }
 async function getCentroForAdmin(actor, res) {
   const centro = await pool.query('SELECT id,slug,nombre,nombre_corto,tema,logo_url,ciudad,bienvenida,direccion,horarios,telefono,whatsapp,email_contacto FROM centros WHERE id=$1', [actor.centro_id]);
@@ -762,6 +867,33 @@ async function route(req, res) {
 
   if (req.method === 'POST' && path === '/api/v1/centro-admin/auth/login') { await centroAdminLogin(await body(req), req, res); return; }
 
+  if (req.method === 'POST' && path === '/api/v1/owner/auth/login') { await ownerLogin(await body(req), req, res); return; }
+  if (req.method === 'POST' && path === '/api/v1/setup/first-owner') {
+    const input = await body(req);
+    if (limited(req, res, 'bootstrap-owner', 5, 60 * 60 * 1000)) return;
+    await bootstrapOwner(input, res); return;
+  }
+
+  if (path.startsWith('/api/v1/owner/')) {
+    const actor = await owner(req, res); if (!actor) return;
+    const suffix = path.slice('/api/v1/owner/'.length);
+    if (req.method === 'GET' && suffix === 'me') { json(res, 200, { owner: { id: actor.id, email: actor.email, displayName: actor.display_name } }); return; }
+    if (req.method === 'GET' && suffix === 'centros') { await listCentros(res); return; }
+    if (req.method === 'POST' && suffix === 'centros') { await createCentro(await body(req), res); return; }
+    if (req.method === 'PATCH' && /^centros\/[0-9a-f-]+$/.test(suffix)) { await ownerUpdateCentro(await body(req), suffix.split('/')[1], res); return; }
+    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/contactos$/.test(suffix)) { await listContactos(suffix.split('/')[1], res); return; }
+    if (req.method === 'POST' && /^centros\/[0-9a-f-]+\/contactos$/.test(suffix)) { await createContacto(await body(req), suffix.split('/')[1], res); return; }
+    if (req.method === 'DELETE' && /^centros\/[0-9a-f-]+\/contactos\/[0-9a-f-]+$/.test(suffix)) {
+      const parts = suffix.split('/'); await deleteContacto(parts[1], parts[3], res); return;
+    }
+    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/professionals$/.test(suffix)) { await listProfessionalsByCentro(suffix.split('/')[1], res); return; }
+    if (req.method === 'POST' && /^centros\/[0-9a-f-]+\/professionals$/.test(suffix)) { await createProfessionalForCentro(await body(req), suffix.split('/')[1], res); return; }
+    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/centro-admins$/.test(suffix)) { await listCentroAdminsByCentro(suffix.split('/')[1], res); return; }
+    if (req.method === 'POST' && suffix === 'centro-admins') { await createCentroAdmin(await body(req), res); return; }
+    if (req.method === 'POST' && /^centro-admins\/[0-9a-f-]+\/reset-password$/.test(suffix)) { await resetCentroAdminPassword(suffix.split('/')[1], res); return; }
+    fail(res, 404, 'not_found', 'No se encontró esta ruta.'); return;
+  }
+
   if (path.startsWith('/api/v1/centro-admin/')) {
     const actor = await centroAdmin(req, res); if (!actor) return;
     const suffix = path.slice('/api/v1/centro-admin/'.length);
@@ -829,9 +961,6 @@ async function route(req, res) {
     }
     if (req.method === 'GET' && suffix === 'admin/professionals') { await listProfessionals(actor, res); return; }
     if (req.method === 'GET' && suffix === 'admin/access') { await listAccess(actor, res); return; }
-    if (req.method === 'GET' && suffix === 'admin/centros') { await listCentros(actor, res); return; }
-    if (req.method === 'POST' && suffix === 'admin/centros') { await createCentro(await body(req), actor, res); return; }
-    if (req.method === 'POST' && suffix === 'admin/centro-admins') { await createCentroAdmin(await body(req), actor, res); return; }
     const adminPatientAccess = suffix.split('/');
     if (adminPatientAccess.length === 4 && adminPatientAccess[0] === 'admin' && adminPatientAccess[1] === 'patients' && validUuid(adminPatientAccess[2]) && adminPatientAccess[3] === 'access') {
       if (req.method === 'PUT') { await grantPatientAccess(await body(req), actor, adminPatientAccess[2], res); return; }
