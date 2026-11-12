@@ -147,6 +147,17 @@ async function owner(req, res) {
   if (!result.rowCount) { fail(res, 401, 'unauthorized', 'La cuenta no está activa.'); return null; }
   return result.rows[0];
 }
+async function changeOwnerPassword(input, actor, res) {
+  if (typeof input.currentPassword !== 'string' || typeof input.newPassword !== 'string' || input.newPassword.length < 12 || input.newPassword.length > 128) {
+    fail(res, 400, 'invalid_input', 'La contraseña nueva debe tener al menos 12 caracteres.'); return;
+  }
+  const result = await pool.query('SELECT password_hash FROM kinima_owners WHERE id=$1', [actor.id]);
+  if (!result.rowCount || !(await checkPassword(input.currentPassword, result.rows[0].password_hash))) {
+    fail(res, 401, 'invalid_credentials', 'La contraseña actual no coincide.'); return;
+  }
+  await pool.query('UPDATE kinima_owners SET password_hash=$1 WHERE id=$2', [await hashPassword(input.newPassword), actor.id]);
+  json(res, 200, { ok: true });
+}
 async function audit(client, actorId, action, type, subjectId, details = {}, deviceId = null) {
   await client.query('INSERT INTO audit_events(id,actor_professional_id,device_id,action,subject_type,subject_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)',
     [randomUUID(), actorId, deviceId, action, type, subjectId, JSON.stringify(details)]);
@@ -878,6 +889,7 @@ async function route(req, res) {
     const actor = await owner(req, res); if (!actor) return;
     const suffix = path.slice('/api/v1/owner/'.length);
     if (req.method === 'GET' && suffix === 'me') { json(res, 200, { owner: { id: actor.id, email: actor.email, displayName: actor.display_name } }); return; }
+    if (req.method === 'POST' && suffix === 'me/password') { await changeOwnerPassword(await body(req), actor, res); return; }
     if (req.method === 'GET' && suffix === 'centros') { await listCentros(res); return; }
     if (req.method === 'POST' && suffix === 'centros') { await createCentro(await body(req), res); return; }
     if (req.method === 'PATCH' && /^centros\/[0-9a-f-]+$/.test(suffix)) { await ownerUpdateCentro(await body(req), suffix.split('/')[1], res); return; }
