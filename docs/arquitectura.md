@@ -28,6 +28,16 @@ La cámara y el detector trabajan en la consola. Al terminar, la consola guarda 
 
 El portal pide las sesiones a la API. La API revisa los permisos del profesional y consulta PostgreSQL. Solo devuelve resultados autorizados.
 
+### Notificaciones push a las familias
+
+La app de familias es una PWA instalable (manifest + service worker) con suscripción a Web Push.
+Al asignar un ejercicio nuevo (`assignDevice`) o publicar un evento del centro (`createEvento`), la
+API le avisa por push a las familias correspondientes (ver `server/push.js`). Un Vercel Cron Job
+llama una vez al día a `GET /api/v1/internal/cron/reminders` (protegida con `CRON_SECRET`), que
+revisa qué pacientes con rutina activa no registraron sesión en las últimas 24 horas y les manda un
+recordatorio a sus familias. Si el ejercicio de recordatorio (horario, frecuencia, mensaje) necesita
+ajustarse, el cron está en `vercel.json` y la lógica en `sendExerciseReminders` (`server/push.js`).
+
 ## Desarrollo local sin Docker
 
 La API Express se puede iniciar en esta computadora con Node. Para conectarla a una base remota hace falta configurar `DATABASE_URL` en el archivo privado `kinima.env` y crear las tablas con `npm run db:migrate`. `npm run dev` prepara los archivos del portal y levanta API y portal localmente. La consola local sigue siendo otro proceso en `npm run device`.
@@ -38,6 +48,7 @@ Docker Compose y el modo local con PostgreSQL en contenedor quedan como material
 
 - En producción, el portal y la API usan HTTPS.
 - Las claves de PostgreSQL, `JWT_SECRET`, `BOOTSTRAP_TOKEN` y los tokens de consola solo van en variables privadas del entorno; nunca se suben a GitHub.
+- Lo mismo vale para `VAPID_PRIVATE_KEY` (notificaciones push) y `CRON_SECRET` (protege la ruta de recordatorios diarios que llama Vercel Cron).
 - Al crear la primera cuenta administradora, hay que quitar `BOOTSTRAP_TOKEN` de Vercel.
 - La base conserva códigos internos y etiquetas, no nombres completos ni datos de contacto en este prototipo.
 - La consola cifra sus datos locales con `DEVICE_DATA_KEY`. Guardá una copia protegida de esa clave fuera del dispositivo.

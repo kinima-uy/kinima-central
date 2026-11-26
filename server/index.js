@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes, randomUUID, createHash, createHmac, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { createKinimaPool } from './db.js';
+import { pushPublicKey, notifyFamilies, familyIdsForPatient, familyIdsForCentro, sendExerciseReminders } from './push.js';
 
 const scrypt = promisify(scryptCallback);
 const pool = createKinimaPool({ max: process.env.VERCEL ? 5 : 12 });
@@ -434,11 +435,39 @@ async function createEvento(input, actor, res) {
   await pool.query('INSERT INTO eventos(id,centro_id,titulo,lugar,detalle,fecha,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)',
     [id, actor.centro_id, titulo, lugar, detalle, fecha.toISOString(), actor.id]);
   json(res, 201, { evento: { id, titulo, lugar, detalle, fecha: fecha.toISOString() } });
+  familyIdsForCentro(pool, actor.centro_id)
+    .then((familyIds) => notifyFamilies(pool, familyIds, {
+      title: 'Nuevo evento en el centro',
+      body: titulo,
+      tag: `evento-${id}`,
+      url: '/centro',
+    }))
+    .catch((error) => console.error('No se pudo avisar el evento por push:', error?.message || error));
 }
 async function deleteEvento(actor, eventoId, res) {
   if (!validUuid(eventoId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
   const result = await pool.query('DELETE FROM eventos WHERE id=$1 AND centro_id=$2', [eventoId, actor.centro_id]);
   if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró el evento.'); return; }
+  json(res, 200, { ok: true });
+}
+function validPushSubscription(value) {
+  return value && typeof value.endpoint === 'string' && value.endpoint.length > 0 && value.endpoint.length < 2048 &&
+    value.keys && typeof value.keys.p256dh === 'string' && value.keys.p256dh.length > 0 &&
+    typeof value.keys.auth === 'string' && value.keys.auth.length > 0;
+}
+async function subscribePush(input, actor, res) {
+  if (!validPushSubscription(input)) { fail(res, 400, 'invalid_input', 'La suscripción push no es válida.'); return; }
+  await pool.query(
+    `INSERT INTO push_subscriptions(id,family_id,endpoint,p256dh,auth) VALUES($1,$2,$3,$4,$5)
+     ON CONFLICT (endpoint) DO UPDATE SET family_id=EXCLUDED.family_id, p256dh=EXCLUDED.p256dh, auth=EXCLUDED.auth, last_seen_at=now()`,
+    [randomUUID(), actor.id, input.endpoint, input.keys.p256dh, input.keys.auth]
+  );
+  json(res, 200, { ok: true });
+}
+async function unsubscribePush(input, actor, res) {
+  const endpoint = typeof input.endpoint === 'string' ? input.endpoint : '';
+  if (!endpoint) { fail(res, 400, 'invalid_input', 'Falta el endpoint de la suscripción.'); return; }
+  await pool.query('DELETE FROM push_subscriptions WHERE endpoint=$1 AND family_id=$2', [endpoint, actor.id]);
   json(res, 200, { ok: true });
 }
 async function getFamilyCentro(actor, patientId, res) {
@@ -739,6 +768,14 @@ async function assignDevice(input, actor, deviceId, res) {
     await audit(client, actor.id, 'assignment.created', 'assignment', id, { patientId: input.patientId, version, exercise: input.exercise }, deviceId);
     await client.query('COMMIT');
     json(res, 201, { assignment: { id, deviceId, patientId: input.patientId, version, status: 'active', exercise: input.exercise } });
+    familyIdsForPatient(pool, input.patientId)
+      .then((familyIds) => notifyFamilies(pool, familyIds, {
+        title: 'Nuevo ejercicio asignado',
+        body: 'El equipo profesional subió una rutina nueva para tu hijo/a.',
+        tag: `asignacion-${id}`,
+        url: '/',
+      }))
+      .catch((error) => console.error('No se pudo avisar la asignación por push:', error?.message || error));
   } catch (error) {
     await client.query('ROLLBACK'); throw error;
   } finally { client.release(); }
@@ -851,6 +888,17 @@ async function route(req, res) {
     return;
   }
   if (req.method === 'GET' && path === '/api/v1/setup/status') { await setupStatus(res); return; }
+  if (req.method === 'GET' && path === '/api/v1/push/public-key') { json(res, 200, { publicKey: pushPublicKey() }); return; }
+  if (req.method === 'GET' && path === '/api/v1/internal/cron/reminders') {
+    // Vercel Cron Jobs llaman a esta ruta con Authorization: Bearer $CRON_SECRET (lo agrega Vercel
+    // automáticamente cuando esa variable de entorno existe). Sin CRON_SECRET configurado, la ruta
+    // queda cerrada por las dudas, no abierta.
+    const secret = process.env.CRON_SECRET || '';
+    const given = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1] || '';
+    if (!secret || !equal(given, secret)) { fail(res, 401, 'unauthorized', 'No autorizado.'); return; }
+    const resultado = await sendExerciseReminders(pool);
+    json(res, 200, resultado); return;
+  }
 
   if (req.method === 'POST' && path === '/api/v1/setup/first-admin') {
     const input = await body(req);
@@ -883,6 +931,8 @@ async function route(req, res) {
       await markPatientMessagesRead(patientId, 'familia', res); return;
     }
     if (req.method === 'GET' && /^patients\/[0-9a-f-]+\/centro$/.test(suffix)) { await getFamilyCentro(actor, suffix.split('/')[1], res); return; }
+    if (req.method === 'POST' && suffix === 'push/subscribe') { await subscribePush(await body(req), actor, res); return; }
+    if (req.method === 'DELETE' && suffix === 'push/subscribe') { await unsubscribePush(await body(req), actor, res); return; }
     fail(res, 404, 'not_found', 'No se encontró esta ruta.'); return;
   }
 

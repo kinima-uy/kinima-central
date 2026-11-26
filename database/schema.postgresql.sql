@@ -225,3 +225,17 @@ CREATE TABLE IF NOT EXISTS audit_events (
     details JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 CREATE INDEX IF NOT EXISTS audit_events_occurred_at ON audit_events(occurred_at DESC);
+
+-- Suscripciones push (Web Push) de cada familia, para avisar sobre nuevos ejercicios asignados,
+-- eventos del centro y recordatorios. Una familia puede tener varias (un dispositivo por suscripción);
+-- se guarda el endpoint tal cual lo entrega el navegador, nunca una credencial de terceros.
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id UUID PRIMARY KEY,
+    family_id UUID NOT NULL REFERENCES families(id),
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS push_subscriptions_family ON push_subscriptions(family_id);

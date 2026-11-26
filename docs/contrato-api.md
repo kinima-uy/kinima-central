@@ -54,6 +54,8 @@ Los pacientes deben usar códigos internos y etiquetas sin datos identificables 
 | `GET`, `POST` | `/api/v1/family/patients/{patientId}/messages` | Lista o envía mensajes con el equipo profesional. |
 | `POST` | `/api/v1/family/patients/{patientId}/messages/read` | Marca como leídos los mensajes que mandó el profesional. |
 | `GET` | `/api/v1/family/patients/{patientId}/centro` | Info, noticias y próximos eventos del centro al que pertenece el paciente. |
+| `GET` | `/api/v1/push/public-key` | Clave pública VAPID para suscribirse a push (sin autenticar). |
+| `POST`, `DELETE` | `/api/v1/family/push/subscribe` | Da de alta o de baja una suscripción push del navegador/dispositivo actual (`{ endpoint, keys: { p256dh, auth } }`). |
 
 Gestión de acceso (lado profesional, requiere acceso al paciente):
 
@@ -62,6 +64,18 @@ Gestión de acceso (lado profesional, requiere acceso al paciente):
 | `GET` | `/api/v1/professional/patients/{patientId}/family` | Lista las cuentas de familia vinculadas al paciente. |
 | `PUT` | `/api/v1/professional/patients/{patientId}/family-access` | Vincula una cuenta de familia existente (`{ familyId }`) a otro paciente (hermanos). |
 | `DELETE` | `/api/v1/professional/patients/{patientId}/family-access` | Revoca el acceso de esa familia a ese paciente. |
+
+## Notificaciones push
+
+La API manda Web Push a las familias en tres momentos: al asignarle un ejercicio nuevo a un
+paciente (`PUT /api/v1/professional/assignments/{deviceId}`), al crear un evento del centro
+(`POST /api/v1/centro-admin/eventos`), y una vez al día por cron, como recordatorio, a las
+familias de pacientes con rutina activa que no registraron ninguna sesión en las últimas 24 horas.
+Un fallo al enviar el push nunca hace fallar la acción que lo disparó. El cliente debe:
+
+1. Pedir la clave pública con `GET /api/v1/push/public-key`.
+2. Suscribirse con el Service Worker (`pushManager.subscribe`) usando esa clave.
+3. Guardar la suscripción con `POST /api/v1/family/push/subscribe` (requiere sesión de familia).
 
 ## Centros (multi-tenant)
 
