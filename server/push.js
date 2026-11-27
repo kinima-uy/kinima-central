@@ -5,6 +5,12 @@
  * entorno del servidor; nunca en el repo.
  */
 import webpush from 'web-push';
+import https from 'node:https';
+
+// Vercel congela la función entre invocaciones: una conexión 'keep-alive' reutilizada puede
+// quedar muerta del otro lado y producir 'write EPIPE' al reusarla. Forzamos conexión nueva
+// (sin keep-alive) en cada envío para evitar eso.
+const pushAgent = new https.Agent({ keepAlive: false });
 
 const PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
 const PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
@@ -31,7 +37,8 @@ export async function notifyFamilies(pool, familyIds, payload) {
       try {
         await webpush.sendNotification(
           { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
-          body
+          body,
+          { agent: pushAgent }
         );
       } catch (error) {
         if (error?.statusCode === 404 || error?.statusCode === 410) {
