@@ -13,3 +13,5 @@ data/
 **/data/
 *.sqlite
 *.sqlite-*
+.vercel
+.env*
