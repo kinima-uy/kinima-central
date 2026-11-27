@@ -49,6 +49,8 @@ Docker Compose y el modo local con PostgreSQL en contenedor quedan como material
 - En producción, el portal y la API usan HTTPS.
 - Las claves de PostgreSQL, `JWT_SECRET`, `BOOTSTRAP_TOKEN` y los tokens de consola solo van en variables privadas del entorno; nunca se suben a GitHub.
 - Lo mismo vale para `VAPID_PRIVATE_KEY` (notificaciones push) y `CRON_SECRET` (protege la ruta de recordatorios diarios que llama Vercel Cron).
+- Y para `BREVO_API_KEY`: con ella y `MAIL_FROM` (un remitente verificado en Brevo) HQ puede mandar los accesos por mail. Sin esas variables HQ funciona igual y muestra la contraseña temporal en pantalla.
+- HQ tiene dos roles: `owner` (dueña, control total) y `viewer` (solo lectura, para docentes o colaboradores). El servidor rechaza cualquier cambio que intente una cuenta `viewer`, y las acciones hechas desde HQ quedan en `audit_events` con `actor_owner_id`.
 - Al crear la primera cuenta administradora, hay que quitar `BOOTSTRAP_TOKEN` de Vercel.
 - La base conserva códigos internos y etiquetas, no nombres completos ni datos de contacto en este prototipo.
 - La consola cifra sus datos locales con `DEVICE_DATA_KEY`. Guardá una copia protegida de esa clave fuera del dispositivo.

@@ -17,6 +17,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LIMITS = new Map();
 const MAX_BODY_BYTES = 512 * 1024;
 const TOKEN_TTL = 8 * 60 * 60;
+// Envío de accesos por mail con Brevo (API transaccional, sin dependencias nuevas). Si estas variables
+// no están configuradas, HQ funciona igual y muestra la contraseña temporal para pasarla a mano.
+const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
+const MAIL_FROM = process.env.MAIL_FROM || '';
+const MAIL_FROM_NAME = process.env.MAIL_FROM_NAME || 'Kinima';
+const PORTAL_URL = 'https://portal.kinima.uy';
+const FAMILIAS_URL = 'https://familias.kinima.uy';
+const HQ_URL = 'https://hq.kinima.uy';
 
 if (JWT_SECRET.length < 32) throw new Error('JWT_SECRET debe tener al menos 32 caracteres aleatorios.');
 
@@ -144,7 +152,7 @@ async function centroAdmin(req, res) {
 async function owner(req, res) {
   const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || ''); const token = match && verifyToken(match[1]);
   if (!token) { fail(res, 401, 'unauthorized', 'Iniciá sesión para continuar.'); return null; }
-  const result = await pool.query('SELECT id,email,display_name FROM kinima_owners WHERE id=$1 AND active=TRUE', [token.sub]);
+  const result = await pool.query('SELECT id,email,display_name,role FROM kinima_owners WHERE id=$1 AND active=TRUE', [token.sub]);
   if (!result.rowCount) { fail(res, 401, 'unauthorized', 'La cuenta no está activa.'); return null; }
   return result.rows[0];
 }
@@ -157,11 +165,43 @@ async function changeOwnerPassword(input, actor, res) {
     fail(res, 401, 'invalid_credentials', 'La contraseña actual no coincide.'); return;
   }
   await pool.query('UPDATE kinima_owners SET password_hash=$1 WHERE id=$2', [await hashPassword(input.newPassword), actor.id]);
+  await ownerAudit(actor, 'owner.password_changed', 'owner', actor.id);
   json(res, 200, { ok: true });
 }
 async function audit(client, actorId, action, type, subjectId, details = {}, deviceId = null) {
   await client.query('INSERT INTO audit_events(id,actor_professional_id,device_id,action,subject_type,subject_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)',
     [randomUUID(), actorId, deviceId, action, type, subjectId, JSON.stringify(details)]);
+}
+// Acciones hechas desde HQ: quedan en el mismo historial (audit_events) con la dueña como autora.
+// Si el registro falla no se corta la acción, pero queda el error en el log del servidor.
+async function ownerAudit(actor, action, type, subjectId, details = {}) {
+  try {
+    await pool.query('INSERT INTO audit_events(id,actor_owner_id,action,subject_type,subject_id,details) VALUES($1,$2,$3,$4,$5,$6::jsonb)',
+      [randomUUID(), actor.id, action, type, subjectId, JSON.stringify(details)]);
+  } catch (error) { console.error('No se pudo registrar la acción de HQ:', error.message); }
+}
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+// Devuelve 'sent', 'not_configured' o 'failed'. Nunca corta la acción: si el mail no sale,
+// HQ igual muestra la contraseña temporal para pasarla a mano.
+async function sendAccessMail({ to, name, rol, url, temporaryPassword, reset }) {
+  if (!BREVO_API_KEY || !validEmail(MAIL_FROM)) return 'not_configured';
+  const saludo = `Hola, ${name}:`;
+  const intro = reset ? 'Generamos una contraseña temporal nueva para tu cuenta de Kinima.' : `Te creamos una cuenta en Kinima como ${rol}.`;
+  const cierre = 'Si no esperabas este correo, respondé a este mensaje y lo revisamos.';
+  const text = [saludo, '', intro, '', `Entrá en: ${url}`, `Correo: ${to}`, `Contraseña temporal: ${temporaryPassword}`, '', cierre, '', 'Equipo Kinima'].join('\n');
+  const html = `<p>${escapeHtml(saludo)}</p><p>${escapeHtml(intro)}</p><p>Entrá en: <a href="${escapeHtml(url)}">${escapeHtml(url)}</a><br>Correo: <b>${escapeHtml(to)}</b><br>Contraseña temporal: <b style="font-family:monospace">${escapeHtml(temporaryPassword)}</b></p><p>${escapeHtml(cierre)}</p><p>Equipo Kinima</p>`;
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': BREVO_API_KEY, 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ sender: { email: MAIL_FROM, name: MAIL_FROM_NAME }, to: [{ email: to, name }], subject: reset ? 'Tu nueva contraseña temporal de Kinima' : 'Tu acceso a Kinima', textContent: text, htmlContent: html }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) { console.error('Brevo no aceptó el correo:', response.status); return 'failed'; }
+    return 'sent';
+  } catch (error) { console.error('No se pudo enviar el correo:', error.message); return 'failed'; }
 }
 async function canAccessPatient(actor, id) {
   if (actor.role === 'administrator') {
@@ -215,7 +255,7 @@ async function bootstrapOwner(input, res) {
   try {
     await pool.query('INSERT INTO kinima_owners(id,email,password_hash,display_name) VALUES($1,lower($2),$3,$4)',
       [id, input.email.trim(), await hashPassword(input.password), input.displayName.trim()]);
-    json(res, 201, { accessToken: signToken(id), expiresIn: TOKEN_TTL, owner: { id, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim() } });
+    json(res, 201, { accessToken: signToken(id), expiresIn: TOKEN_TTL, owner: { id, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim(), role: 'owner' } });
   } catch (error) {
     if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta de dueña con ese correo.'); return; }
     throw error;
@@ -224,12 +264,12 @@ async function bootstrapOwner(input, res) {
 async function ownerLogin(input, req, res) {
   if (limited(req, res, 'owner-login', 10, 15 * 60 * 1000)) return;
   if (!validEmail(input.email) || typeof input.password !== 'string' || input.password.length > 128) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
-  const result = await pool.query('SELECT id,email,password_hash,display_name FROM kinima_owners WHERE lower(email)=lower($1) AND active=TRUE', [input.email.trim()]);
+  const result = await pool.query('SELECT id,email,password_hash,display_name,role FROM kinima_owners WHERE lower(email)=lower($1) AND active=TRUE', [input.email.trim()]);
   const user = result.rows[0];
   if (!user) await scrypt(input.password, 'kinima-constant-login-salt', 64);
   else if (!(await checkPassword(input.password, user.password_hash))) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
-  json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, owner: { id: user.id, email: user.email, displayName: user.display_name } });
+  json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, owner: { id: user.id, email: user.email, displayName: user.display_name, role: user.role } });
 }
 async function login(input, req, res) {
   if (limited(req, res, 'login', 10, 15 * 60 * 1000)) return;
@@ -251,11 +291,26 @@ async function familyLogin(input, req, res) {
   if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, family: { id: user.id, email: user.email, displayName: user.display_name } });
 }
+// ---------- HQ (dueñas de Kinima y cuentas de solo lectura) ----------
+const temporaryPasswordFor = (bytes = 9) => randomBytes(bytes).toString('base64url');
+const ROL_MAIL = { professional: 'profesional', administrator: 'administrador/a del centro' };
+
 async function listCentros(res) {
-  const result = await pool.query('SELECT id,slug,nombre,nombre_corto,tema,ciudad,active FROM centros ORDER BY active DESC, nombre');
-  json(res, 200, { centros: result.rows.map((row) => ({ id: row.id, slug: row.slug, nombre: row.nombre, nombreCorto: row.nombre_corto, tema: row.tema, ciudad: row.ciudad, active: row.active })) });
+  // Resumen por centro para HQ: solo cantidades y fechas, nunca datos de pacientes ni de familias.
+  const result = await pool.query(`SELECT c.id,c.slug,c.nombre,c.nombre_corto,c.tema,c.ciudad,c.active,
+      (SELECT COUNT(*) FROM patients p WHERE p.centro_id=c.id AND p.active=TRUE)::integer AS pacientes,
+      (SELECT COUNT(*) FROM professionals p WHERE p.centro_id=c.id AND p.active=TRUE)::integer AS profesionales,
+      (SELECT COUNT(*) FROM devices d WHERE d.centro_id=c.id AND d.active=TRUE)::integer AS consolas,
+      (SELECT COUNT(DISTINCT a.family_id) FROM family_patient_access a JOIN patients p ON p.id=a.patient_id WHERE p.centro_id=c.id)::integer AS familias,
+      (SELECT MAX(s.received_at) FROM sessions s JOIN patients p ON p.id=s.patient_id WHERE p.centro_id=c.id) AS ultima_sesion,
+      (SELECT MAX(e.occurred_at) FROM audit_events e JOIN professionals p ON p.id=e.actor_professional_id WHERE p.centro_id=c.id) AS ultima_accion
+    FROM centros c ORDER BY c.active DESC, c.nombre`);
+  json(res, 200, { centros: result.rows.map((row) => ({
+    id: row.id, slug: row.slug, nombre: row.nombre, nombreCorto: row.nombre_corto, tema: row.tema, ciudad: row.ciudad, active: row.active,
+    resumen: { pacientes: row.pacientes, profesionales: row.profesionales, consolas: row.consolas, familias: row.familias, ultimaSesion: row.ultima_sesion, ultimaAccion: row.ultima_accion },
+  })) });
 }
-async function createCentro(input, res) {
+async function createCentro(input, actor, res) {
   const slug = typeof input.slug === 'string' ? input.slug.trim().toLowerCase() : '';
   const nombre = typeof input.nombre === 'string' ? input.nombre.trim() : '';
   const nombreCorto = typeof input.nombreCorto === 'string' ? input.nombreCorto.trim() : nombre.slice(0, 40);
@@ -263,22 +318,23 @@ async function createCentro(input, res) {
   const id = randomUUID();
   try {
     await pool.query('INSERT INTO centros(id,slug,nombre,nombre_corto) VALUES($1,$2,$3,$4)', [id, slug, nombre, nombreCorto || nombre.slice(0, 40)]);
-    json(res, 201, { centro: { id, slug, nombre, nombreCorto: nombreCorto || nombre.slice(0, 40), active: true } });
   } catch (error) {
     if (error.code === '23505') { fail(res, 409, 'slug_exists', 'Ya existe un centro con ese slug.'); return; }
     throw error;
   }
+  await ownerAudit(actor, 'centro.created', 'centro', id, { centroId: id, slug, nombre });
+  json(res, 201, { centro: { id, slug, nombre, nombreCorto: nombreCorto || nombre.slice(0, 40), active: true } });
 }
-async function ownerUpdateCentro(input, centroId, res) {
+async function ownerUpdateCentro(input, centroId, actor, res) {
   if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
-  const sets = []; const values = []; let n = 1;
+  const sets = []; const values = []; const campos = []; let n = 1;
   for (const [key, column] of Object.entries(CENTRO_CAMPOS)) {
     if (!(key in input)) continue;
     const value = input[key];
     if (value !== null && typeof value !== 'string') { fail(res, 400, 'invalid_input', `El campo ${key} no es válido.`); return; }
     if (key === 'tema' && !TEMAS_VALIDOS.includes(value)) { fail(res, 400, 'invalid_input', 'El tema no es válido.'); return; }
     if (key === 'nombre' && (!value || value.trim().length < 2 || value.trim().length > 100)) { fail(res, 400, 'invalid_input', 'El nombre no es válido.'); return; }
-    sets.push(`${column}=$${n}`); values.push(typeof value === 'string' ? value.trim() : value); n += 1;
+    sets.push(`${column}=$${n}`); values.push(typeof value === 'string' ? value.trim() : value); campos.push(key); n += 1;
   }
   if ('active' in input) {
     if (typeof input.active !== 'boolean') { fail(res, 400, 'invalid_input', 'El campo active no es válido.'); return; }
@@ -288,6 +344,7 @@ async function ownerUpdateCentro(input, centroId, res) {
   values.push(centroId);
   const result = await pool.query(`UPDATE centros SET ${sets.join(',')} WHERE id=$${n} RETURNING id`, values);
   if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
+  await ownerAudit(actor, 'centro.updated', 'centro', centroId, { centroId, campos, ...('active' in input ? { active: input.active } : {}) });
   json(res, 200, { ok: true });
 }
 async function listContactos(centroId, res) {
@@ -295,7 +352,7 @@ async function listContactos(centroId, res) {
   const result = await pool.query('SELECT id,nombre,cargo,telefono,email FROM centro_contactos WHERE centro_id=$1 ORDER BY nombre', [centroId]);
   json(res, 200, { contactos: result.rows.map((row) => ({ id: row.id, nombre: row.nombre, cargo: row.cargo, telefono: row.telefono, email: row.email })) });
 }
-async function createContacto(input, centroId, res) {
+async function createContacto(input, centroId, actor, res) {
   if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
   const nombre = typeof input.nombre === 'string' ? input.nombre.trim() : '';
   if (nombre.length < 1 || nombre.length > 100) { fail(res, 400, 'invalid_input', 'Ingresá un nombre.'); return; }
@@ -306,32 +363,38 @@ async function createContacto(input, centroId, res) {
   if (!centroExists.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
   const id = randomUUID();
   await pool.query('INSERT INTO centro_contactos(id,centro_id,nombre,cargo,telefono,email) VALUES($1,$2,$3,$4,$5,$6)', [id, centroId, nombre, cargo, telefono, email]);
+  await ownerAudit(actor, 'contacto.created', 'contacto', id, { centroId });
   json(res, 201, { contacto: { id, nombre, cargo, telefono, email } });
 }
-async function deleteContacto(centroId, contactoId, res) {
+async function deleteContacto(centroId, contactoId, actor, res) {
   if (!validUuid(centroId) || !validUuid(contactoId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
   const result = await pool.query('DELETE FROM centro_contactos WHERE id=$1 AND centro_id=$2', [contactoId, centroId]);
   if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró el contacto.'); return; }
+  await ownerAudit(actor, 'contacto.deleted', 'contacto', contactoId, { centroId });
   json(res, 200, { ok: true });
 }
 async function listCentroAdminsByCentro(centroId, res) {
   if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
-  const result = await pool.query('SELECT id,email,display_name FROM centro_admins WHERE centro_id=$1 AND active=TRUE ORDER BY display_name', [centroId]);
-  json(res, 200, { centroAdmins: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name })) });
+  const result = await pool.query('SELECT id,email,display_name,active FROM centro_admins WHERE centro_id=$1 ORDER BY active DESC, display_name', [centroId]);
+  json(res, 200, { centroAdmins: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, active: row.active })) });
 }
-async function resetCentroAdminPassword(centroAdminId, res) {
+async function resetCentroAdminPassword(centroAdminId, input, actor, res) {
   if (!validUuid(centroAdminId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
-  const temporaryPassword = randomBytes(9).toString('base64url');
-  const result = await pool.query('UPDATE centro_admins SET password_hash=$1 WHERE id=$2 AND active=TRUE RETURNING id', [await hashPassword(temporaryPassword), centroAdminId]);
+  const temporaryPassword = temporaryPasswordFor();
+  const result = await pool.query(`UPDATE centro_admins a SET password_hash=$1 FROM centros c
+    WHERE a.id=$2 AND a.active=TRUE AND c.id=a.centro_id RETURNING a.id,a.email,a.display_name,a.centro_id,c.slug`, [await hashPassword(temporaryPassword), centroAdminId]);
   if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta.'); return; }
-  json(res, 200, { temporaryPassword });
+  const row = result.rows[0];
+  await ownerAudit(actor, 'centro_admin.password_reset', 'centro_admin', row.id, { centroId: row.centro_id, email: row.email });
+  const mail = input.sendEmail === true ? await sendAccessMail({ to: row.email, name: row.display_name, url: `${FAMILIAS_URL}/${row.slug}/panel`, temporaryPassword, reset: true }) : 'skipped';
+  json(res, 200, { temporaryPassword, mail });
 }
 async function listProfessionalsByCentro(centroId, res) {
   if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
-  const result = await pool.query('SELECT id,email,display_name,role FROM professionals WHERE centro_id=$1 AND active=TRUE ORDER BY display_name', [centroId]);
-  json(res, 200, { professionals: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, role: row.role })) });
+  const result = await pool.query('SELECT id,email,display_name,role,active FROM professionals WHERE centro_id=$1 ORDER BY active DESC, display_name', [centroId]);
+  json(res, 200, { professionals: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, role: row.role, active: row.active })) });
 }
-async function createProfessionalForCentro(input, centroId, res) {
+async function createProfessionalForCentro(input, centroId, actor, res) {
   if (!validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
   const role = ['professional', 'administrator'].includes(input.role) ? input.role : 'professional';
   if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100) {
@@ -339,15 +402,100 @@ async function createProfessionalForCentro(input, centroId, res) {
   }
   const centroExists = await pool.query('SELECT 1 FROM centros WHERE id=$1', [centroId]);
   if (!centroExists.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
-  const id = randomUUID(); const temporaryPassword = randomBytes(9).toString('base64url');
+  const id = randomUUID(); const temporaryPassword = temporaryPasswordFor();
+  const email = input.email.trim().toLowerCase(); const displayName = input.displayName.trim();
   try {
-    await pool.query('INSERT INTO professionals(id,email,password_hash,display_name,role,centro_id) VALUES($1,lower($2),$3,$4,$5,$6)',
-      [id, input.email.trim(), await hashPassword(temporaryPassword), input.displayName.trim(), role, centroId]);
-    json(res, 201, { professional: { id, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim(), role, centroId }, temporaryPassword });
+    await pool.query('INSERT INTO professionals(id,email,password_hash,display_name,role,centro_id) VALUES($1,$2,$3,$4,$5,$6)',
+      [id, email, await hashPassword(temporaryPassword), displayName, role, centroId]);
   } catch (error) {
     if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta con ese correo.'); return; }
     throw error;
   }
+  await ownerAudit(actor, 'professional.created', 'professional', id, { centroId, email, role });
+  const mail = input.sendEmail === true ? await sendAccessMail({ to: email, name: displayName, rol: ROL_MAIL[role], url: PORTAL_URL, temporaryPassword, reset: false }) : 'skipped';
+  json(res, 201, { professional: { id, email, displayName, role, centroId, active: true }, temporaryPassword, mail });
+}
+async function resetProfessionalPassword(professionalId, input, actor, res) {
+  if (!validUuid(professionalId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const temporaryPassword = temporaryPasswordFor();
+  const result = await pool.query('UPDATE professionals SET password_hash=$1 WHERE id=$2 AND active=TRUE RETURNING id,email,display_name,centro_id',
+    [await hashPassword(temporaryPassword), professionalId]);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta.'); return; }
+  const row = result.rows[0];
+  await ownerAudit(actor, 'professional.password_reset', 'professional', row.id, { centroId: row.centro_id, email: row.email });
+  const mail = input.sendEmail === true ? await sendAccessMail({ to: row.email, name: row.display_name, url: PORTAL_URL, temporaryPassword, reset: true }) : 'skipped';
+  json(res, 200, { temporaryPassword, mail });
+}
+// Desactivar no borra nada: la cuenta deja de poder entrar (las sesiones abiertas se cortan en la
+// próxima llamada, porque cada ruta vuelve a mirar active=TRUE) y se puede reactivar cuando haga falta.
+async function setAccountActive(kind, accountId, input, actor, res) {
+  if (!validUuid(accountId) || typeof input.active !== 'boolean') { fail(res, 400, 'invalid_input', 'Indicá si la cuenta queda activa o no.'); return; }
+  const table = kind === 'professional' ? 'professionals' : 'centro_admins';
+  const result = await pool.query(`UPDATE ${table} SET active=$1 WHERE id=$2 RETURNING id,email,centro_id`, [input.active, accountId]);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta.'); return; }
+  await ownerAudit(actor, `${kind}.${input.active ? 'activated' : 'deactivated'}`, kind, accountId, { centroId: result.rows[0].centro_id, email: result.rows[0].email });
+  json(res, 200, { ok: true, active: input.active });
+}
+async function listActivity(url, res) {
+  const centroId = url.searchParams.get('centroId') || null;
+  if (centroId && !validUuid(centroId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') || '80', 10) || 80, 1), 200);
+  const result = await pool.query(`SELECT e.id,e.action,e.subject_type,e.occurred_at,e.details,e.actor_owner_id,
+      o.display_name AS owner_name, p.display_name AS professional_name, c.id AS centro_id, c.nombre AS centro_nombre
+    FROM audit_events e
+    LEFT JOIN kinima_owners o ON o.id=e.actor_owner_id
+    LEFT JOIN professionals p ON p.id=e.actor_professional_id
+    LEFT JOIN centros c ON c.id=COALESCE(p.centro_id, CASE WHEN e.details->>'centroId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (e.details->>'centroId')::uuid END)
+    WHERE ($1::uuid IS NULL OR c.id=$1::uuid)
+    ORDER BY e.occurred_at DESC LIMIT $2`, [centroId, limit]);
+  json(res, 200, { events: result.rows.map((row) => ({
+    id: row.id, action: row.action, subjectType: row.subject_type, occurredAt: row.occurred_at,
+    actor: row.actor_owner_id ? { type: 'hq', name: row.owner_name } : { type: 'centro', name: row.professional_name || null },
+    centro: row.centro_id ? { id: row.centro_id, nombre: row.centro_nombre } : null,
+    // Solo se devuelven los detalles de las acciones de HQ: los de los centros pueden incluir datos de familias.
+    details: row.actor_owner_id ? row.details : {},
+  })) });
+}
+async function listOwners(res) {
+  const result = await pool.query('SELECT id,email,display_name,role,active,created_at FROM kinima_owners ORDER BY active DESC, role, display_name');
+  json(res, 200, { owners: result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, role: row.role, active: row.active, createdAt: row.created_at })) });
+}
+async function createOwnerAccount(input, actor, res) {
+  const role = input.role === 'owner' ? 'owner' : 'viewer';
+  if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100) {
+    fail(res, 400, 'invalid_input', 'Revisá el correo y el nombre.'); return;
+  }
+  const id = randomUUID(); const temporaryPassword = temporaryPasswordFor(12);
+  const email = input.email.trim().toLowerCase(); const displayName = input.displayName.trim();
+  try {
+    await pool.query('INSERT INTO kinima_owners(id,email,password_hash,display_name,role) VALUES($1,$2,$3,$4,$5)', [id, email, await hashPassword(temporaryPassword), displayName, role]);
+  } catch (error) {
+    if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta de HQ con ese correo.'); return; }
+    throw error;
+  }
+  await ownerAudit(actor, 'owner.created', 'owner', id, { email, role });
+  const mail = input.sendEmail === true ? await sendAccessMail({ to: email, name: displayName, rol: role === 'viewer' ? 'cuenta de consulta de HQ (solo lectura)' : 'dueña en HQ', url: HQ_URL, temporaryPassword, reset: false }) : 'skipped';
+  json(res, 201, { owner: { id, email, displayName, role, active: true }, temporaryPassword, mail });
+}
+async function setOwnerActive(ownerId, input, actor, res) {
+  if (!validUuid(ownerId) || typeof input.active !== 'boolean') { fail(res, 400, 'invalid_input', 'Indicá si la cuenta queda activa o no.'); return; }
+  if (ownerId === actor.id) { fail(res, 400, 'invalid_input', 'No podés desactivar tu propia cuenta.'); return; }
+  const result = await pool.query('UPDATE kinima_owners SET active=$1 WHERE id=$2 RETURNING id,email', [input.active, ownerId]);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta.'); return; }
+  await ownerAudit(actor, `owner.${input.active ? 'activated' : 'deactivated'}`, 'owner', ownerId, { email: result.rows[0].email });
+  json(res, 200, { ok: true, active: input.active });
+}
+async function resetOwnerPassword(ownerId, input, actor, res) {
+  if (!validUuid(ownerId)) { fail(res, 400, 'invalid_input', 'El identificador no es válido.'); return; }
+  if (ownerId === actor.id) { fail(res, 400, 'invalid_input', 'Para tu propia cuenta usá “Cambiar mi contraseña”.'); return; }
+  const temporaryPassword = temporaryPasswordFor(12);
+  const result = await pool.query('UPDATE kinima_owners SET password_hash=$1 WHERE id=$2 AND active=TRUE RETURNING id,email,display_name',
+    [await hashPassword(temporaryPassword), ownerId]);
+  if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta.'); return; }
+  const row = result.rows[0];
+  await ownerAudit(actor, 'owner.password_reset', 'owner', row.id, { email: row.email });
+  const mail = input.sendEmail === true ? await sendAccessMail({ to: row.email, name: row.display_name, url: HQ_URL, temporaryPassword, reset: true }) : 'skipped';
+  json(res, 200, { temporaryPassword, mail });
 }
 async function centroAdminLogin(input, req, res) {
   if (limited(req, res, 'centro-admin-login', 10, 15 * 60 * 1000)) return;
@@ -359,22 +507,25 @@ async function centroAdminLogin(input, req, res) {
   if (!user) { fail(res, 401, 'invalid_credentials', 'El correo o la contraseña no coinciden.'); return; }
   json(res, 200, { accessToken: signToken(user.id), expiresIn: TOKEN_TTL, centroAdmin: { id: user.id, centroId: user.centro_id, email: user.email, displayName: user.display_name } });
 }
-async function createCentroAdmin(input, res) {
+async function createCentroAdmin(input, actor, res) {
   if (!validUuid(input.centroId)) { fail(res, 400, 'invalid_input', 'Falta el centro.'); return; }
   if (!validEmail(input.email) || typeof input.displayName !== 'string' || input.displayName.trim().length < 2 || input.displayName.trim().length > 100) {
     fail(res, 400, 'invalid_input', 'Revisá el correo y el nombre.'); return;
   }
-  const centroExists = await pool.query('SELECT 1 FROM centros WHERE id=$1 AND active=TRUE', [input.centroId]);
-  if (!centroExists.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
-  const id = randomUUID(); const temporaryPassword = randomBytes(9).toString('base64url');
+  const centro = await pool.query('SELECT slug FROM centros WHERE id=$1 AND active=TRUE', [input.centroId]);
+  if (!centro.rowCount) { fail(res, 404, 'not_found', 'No se encontró el centro.'); return; }
+  const id = randomUUID(); const temporaryPassword = temporaryPasswordFor();
+  const email = input.email.trim().toLowerCase(); const displayName = input.displayName.trim();
   try {
-    await pool.query('INSERT INTO centro_admins(id,centro_id,email,password_hash,display_name) VALUES($1,$2,lower($3),$4,$5)',
-      [id, input.centroId, input.email.trim(), await hashPassword(temporaryPassword), input.displayName.trim()]);
-    json(res, 201, { centroAdmin: { id, centroId: input.centroId, email: input.email.trim().toLowerCase(), displayName: input.displayName.trim() }, temporaryPassword });
+    await pool.query('INSERT INTO centro_admins(id,centro_id,email,password_hash,display_name) VALUES($1,$2,$3,$4,$5)',
+      [id, input.centroId, email, await hashPassword(temporaryPassword), displayName]);
   } catch (error) {
     if (error.code === '23505') { fail(res, 409, 'email_exists', 'Ya existe una cuenta de centro con ese correo.'); return; }
     throw error;
   }
+  await ownerAudit(actor, 'centro_admin.created', 'centro_admin', id, { centroId: input.centroId, email });
+  const mail = input.sendEmail === true ? await sendAccessMail({ to: email, name: displayName, rol: 'responsable de comunicación del centro', url: `${FAMILIAS_URL}/${centro.rows[0].slug}/panel`, temporaryPassword, reset: false }) : 'skipped';
+  json(res, 201, { centroAdmin: { id, centroId: input.centroId, email, displayName, active: true }, temporaryPassword, mail });
 }
 async function getCentroForAdmin(actor, res) {
   const centro = await pool.query('SELECT id,slug,nombre,nombre_corto,tema,logo_url,ciudad,bienvenida,direccion,horarios,telefono,whatsapp,email_contacto FROM centros WHERE id=$1', [actor.centro_id]);
@@ -948,21 +1099,36 @@ async function route(req, res) {
   if (path.startsWith('/api/v1/owner/')) {
     const actor = await owner(req, res); if (!actor) return;
     const suffix = path.slice('/api/v1/owner/'.length);
-    if (req.method === 'GET' && suffix === 'me') { json(res, 200, { owner: { id: actor.id, email: actor.email, displayName: actor.display_name } }); return; }
+    // Las cuentas de solo lectura (docentes, colaboradores) ven todo HQ pero no pueden cambiar nada,
+    // y tampoco ven los contactos internos de los centros ni la lista de cuentas de HQ.
+    if (actor.role === 'viewer') {
+      if (req.method !== 'GET' && suffix !== 'me/password') { fail(res, 403, 'read_only', 'Esta cuenta es de solo lectura.'); return; }
+      if (/\/contactos$/.test(suffix) || suffix === 'owners') { fail(res, 403, 'forbidden', 'Esta sección es solo para las dueñas de Kinima.'); return; }
+    }
+    const id = suffix.split('/')[1];
+    if (req.method === 'GET' && suffix === 'me') { json(res, 200, { owner: { id: actor.id, email: actor.email, displayName: actor.display_name, role: actor.role } }); return; }
     if (req.method === 'POST' && suffix === 'me/password') { await changeOwnerPassword(await body(req), actor, res); return; }
     if (req.method === 'GET' && suffix === 'centros') { await listCentros(res); return; }
-    if (req.method === 'POST' && suffix === 'centros') { await createCentro(await body(req), res); return; }
-    if (req.method === 'PATCH' && /^centros\/[0-9a-f-]+$/.test(suffix)) { await ownerUpdateCentro(await body(req), suffix.split('/')[1], res); return; }
-    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/contactos$/.test(suffix)) { await listContactos(suffix.split('/')[1], res); return; }
-    if (req.method === 'POST' && /^centros\/[0-9a-f-]+\/contactos$/.test(suffix)) { await createContacto(await body(req), suffix.split('/')[1], res); return; }
+    if (req.method === 'POST' && suffix === 'centros') { await createCentro(await body(req), actor, res); return; }
+    if (req.method === 'PATCH' && /^centros\/[0-9a-f-]+$/.test(suffix)) { await ownerUpdateCentro(await body(req), id, actor, res); return; }
+    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/contactos$/.test(suffix)) { await listContactos(id, res); return; }
+    if (req.method === 'POST' && /^centros\/[0-9a-f-]+\/contactos$/.test(suffix)) { await createContacto(await body(req), id, actor, res); return; }
     if (req.method === 'DELETE' && /^centros\/[0-9a-f-]+\/contactos\/[0-9a-f-]+$/.test(suffix)) {
-      const parts = suffix.split('/'); await deleteContacto(parts[1], parts[3], res); return;
+      const parts = suffix.split('/'); await deleteContacto(parts[1], parts[3], actor, res); return;
     }
-    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/professionals$/.test(suffix)) { await listProfessionalsByCentro(suffix.split('/')[1], res); return; }
-    if (req.method === 'POST' && /^centros\/[0-9a-f-]+\/professionals$/.test(suffix)) { await createProfessionalForCentro(await body(req), suffix.split('/')[1], res); return; }
-    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/centro-admins$/.test(suffix)) { await listCentroAdminsByCentro(suffix.split('/')[1], res); return; }
-    if (req.method === 'POST' && suffix === 'centro-admins') { await createCentroAdmin(await body(req), res); return; }
-    if (req.method === 'POST' && /^centro-admins\/[0-9a-f-]+\/reset-password$/.test(suffix)) { await resetCentroAdminPassword(suffix.split('/')[1], res); return; }
+    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/professionals$/.test(suffix)) { await listProfessionalsByCentro(id, res); return; }
+    if (req.method === 'POST' && /^centros\/[0-9a-f-]+\/professionals$/.test(suffix)) { await createProfessionalForCentro(await body(req), id, actor, res); return; }
+    if (req.method === 'POST' && /^professionals\/[0-9a-f-]+\/reset-password$/.test(suffix)) { await resetProfessionalPassword(id, await body(req), actor, res); return; }
+    if (req.method === 'PATCH' && /^professionals\/[0-9a-f-]+$/.test(suffix)) { await setAccountActive('professional', id, await body(req), actor, res); return; }
+    if (req.method === 'GET' && /^centros\/[0-9a-f-]+\/centro-admins$/.test(suffix)) { await listCentroAdminsByCentro(id, res); return; }
+    if (req.method === 'POST' && suffix === 'centro-admins') { await createCentroAdmin(await body(req), actor, res); return; }
+    if (req.method === 'POST' && /^centro-admins\/[0-9a-f-]+\/reset-password$/.test(suffix)) { await resetCentroAdminPassword(id, await body(req), actor, res); return; }
+    if (req.method === 'PATCH' && /^centro-admins\/[0-9a-f-]+$/.test(suffix)) { await setAccountActive('centro_admin', id, await body(req), actor, res); return; }
+    if (req.method === 'GET' && suffix === 'activity') { await listActivity(url, res); return; }
+    if (req.method === 'GET' && suffix === 'owners') { await listOwners(res); return; }
+    if (req.method === 'POST' && suffix === 'owners') { await createOwnerAccount(await body(req), actor, res); return; }
+    if (req.method === 'PATCH' && /^owners\/[0-9a-f-]+$/.test(suffix)) { await setOwnerActive(id, await body(req), actor, res); return; }
+    if (req.method === 'POST' && /^owners\/[0-9a-f-]+\/reset-password$/.test(suffix)) { await resetOwnerPassword(id, await body(req), actor, res); return; }
     fail(res, 404, 'not_found', 'No se encontró esta ruta.'); return;
   }
 

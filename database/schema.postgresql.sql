@@ -239,3 +239,9 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS push_subscriptions_family ON push_subscriptions(family_id);
+
+-- Cuentas de HQ con rol: 'owner' (dueña de Kinima, control total) y 'viewer' (solo lectura, para
+-- docentes o colaboradores que tienen que ver HQ sin poder cambiar nada).
+ALTER TABLE kinima_owners ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'viewer'));
+-- Las acciones hechas desde HQ quedan en el mismo historial, con la cuenta de HQ como autora.
+ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS actor_owner_id UUID REFERENCES kinima_owners(id);
