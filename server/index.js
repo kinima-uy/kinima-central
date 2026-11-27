@@ -334,6 +334,7 @@ async function ownerUpdateCentro(input, centroId, actor, res) {
     if (value !== null && typeof value !== 'string') { fail(res, 400, 'invalid_input', `El campo ${key} no es válido.`); return; }
     if (key === 'tema' && !TEMAS_VALIDOS.includes(value)) { fail(res, 400, 'invalid_input', 'El tema no es válido.'); return; }
     if (key === 'nombre' && (!value || value.trim().length < 2 || value.trim().length > 100)) { fail(res, 400, 'invalid_input', 'El nombre no es válido.'); return; }
+    if (key === 'logoUrl' && !validLogo(value)) { fail(res, 400, 'invalid_input', 'El logo tiene que ser una imagen PNG, JPG o WebP de menos de 250 KB.'); return; }
     sets.push(`${column}=$${n}`); values.push(typeof value === 'string' ? value.trim() : value); campos.push(key); n += 1;
   }
   if ('active' in input) {
@@ -386,7 +387,7 @@ async function resetCentroAdminPassword(centroAdminId, input, actor, res) {
   if (!result.rowCount) { fail(res, 404, 'not_found', 'No se encontró la cuenta.'); return; }
   const row = result.rows[0];
   await ownerAudit(actor, 'centro_admin.password_reset', 'centro_admin', row.id, { centroId: row.centro_id, email: row.email });
-  const mail = input.sendEmail === true ? await sendAccessMail({ to: row.email, name: row.display_name, url: `${FAMILIAS_URL}/${row.slug}/panel`, temporaryPassword, reset: true }) : 'skipped';
+  const mail = input.sendEmail === true ? await sendAccessMail({ to: row.email, name: row.display_name, url: `${FAMILIAS_URL}/centro-admin/ingresar`, temporaryPassword, reset: true }) : 'skipped';
   json(res, 200, { temporaryPassword, mail });
 }
 async function listProfessionalsByCentro(centroId, res) {
@@ -524,7 +525,7 @@ async function createCentroAdmin(input, actor, res) {
     throw error;
   }
   await ownerAudit(actor, 'centro_admin.created', 'centro_admin', id, { centroId: input.centroId, email });
-  const mail = input.sendEmail === true ? await sendAccessMail({ to: email, name: displayName, rol: 'responsable de comunicación del centro', url: `${FAMILIAS_URL}/${centro.rows[0].slug}/panel`, temporaryPassword, reset: false }) : 'skipped';
+  const mail = input.sendEmail === true ? await sendAccessMail({ to: email, name: displayName, rol: 'responsable de comunicación del centro', url: `${FAMILIAS_URL}/centro-admin/ingresar`, temporaryPassword, reset: false }) : 'skipped';
   json(res, 201, { centroAdmin: { id, centroId: input.centroId, email, displayName, active: true }, temporaryPassword, mail });
 }
 async function getCentroForAdmin(actor, res) {
@@ -545,6 +546,13 @@ function mapEvento(row) {
 }
 const CENTRO_CAMPOS = { nombre: 'nombre', nombreCorto: 'nombre_corto', tema: 'tema', logoUrl: 'logo_url', ciudad: 'ciudad', bienvenida: 'bienvenida', direccion: 'direccion', horarios: 'horarios', telefono: 'telefono', whatsapp: 'whatsapp', emailContacto: 'email_contacto' };
 const TEMAS_VALIDOS = ['teal', 'coral', 'amarillo', 'navy'];
+// El logo del centro se guarda como imagen chica (la app la achica antes de subirla) en data URL,
+// o como un enlace https. Nada de SVG ni otros formatos, para no servir contenido activo.
+function validLogo(value) {
+  if (value === null || value === '') return true;
+  if (typeof value !== 'string' || value.length > 350000) return false;
+  return /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value) || /^https:\/\/[^\s"'<>]+$/.test(value);
+}
 async function updateCentro(input, actor, res) {
   const sets = []; const values = []; let n = 1;
   for (const [key, column] of Object.entries(CENTRO_CAMPOS)) {
@@ -553,7 +561,8 @@ async function updateCentro(input, actor, res) {
     if (value !== null && typeof value !== 'string') { fail(res, 400, 'invalid_input', `El campo ${key} no es válido.`); return; }
     if (key === 'tema' && !TEMAS_VALIDOS.includes(value)) { fail(res, 400, 'invalid_input', 'El tema no es válido.'); return; }
     if (key === 'nombre' && (!value || value.trim().length < 2 || value.trim().length > 100)) { fail(res, 400, 'invalid_input', 'El nombre no es válido.'); return; }
-    sets.push(`${column}=$${n}`); values.push(typeof value === 'string' ? value.trim() : value); n += 1;
+    if (key === 'logoUrl' && !validLogo(value)) { fail(res, 400, 'invalid_input', 'El logo tiene que ser una imagen PNG, JPG o WebP de menos de 250 KB.'); return; }
+    sets.push(`${column}=$${n}`); values.push(key === 'logoUrl' && !value ? null : typeof value === 'string' ? value.trim() : value); n += 1;
   }
   if (!sets.length) { fail(res, 400, 'invalid_input', 'No hay nada para actualizar.'); return; }
   values.push(actor.centro_id);
